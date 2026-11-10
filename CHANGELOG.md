@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Epic Games Store version 1.9.8b supported. Its `WHGame.dll` is a different build from Steam 1.9.8, so every fixed address the plugin used had moved: the log said "creation-site bytes differ", "jitter generator bytes differ" and "LoadXmlFromFile slot is ..." and no DLSS ran. The addresses are now one table with a row per build, and the plugin picks the row at start by checking which build's functions sit in the renderer and `CSystem` vtables (read only). The log names the build: `WHGame.dll build: Epic 1.9.8b (2/2 identity checks)`. Confirmed in game on Epic 1.9.8b. Steam 1.9.8 uses the same values and checks as before (unchanged by inspection, not re-run); see HOW-IT-WORKS.md, "Game builds".
+- On an unknown game version the plugin now skips everything at fixed addresses (DLSS, motion-vector and jitter patches, menu rows, console cvars) instead of reading the Steam addresses; the grass fix and the sharpening removal, which find their code by pattern, still apply.
+
 ## BETA 3 (2026-11-09)
 
 Plugin build 0.8.0.

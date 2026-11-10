@@ -610,19 +610,64 @@ static FARPROC WINAPI my_GetProcAddress(HMODULE h, LPCSTR name)
  * convention: -x, +y) goes to DLSS as Jitter.Offset.
  * Requirements (user.cfg): r_Width/r_Height = render size, r_NativeWidth/r_NativeHeight = output size (or
  * fullscreen native res), r_AntialiasingMode 0. Anything unexpected: log once, leave the game's stretch result. */
-#define RVA_RENDERER    0x34c6980u   /* CD3D9Renderer instance (static object) */
-#define RVA_VT_UPSCALE  0x23e9b68u   /* renderer vtable entry +0xab8 */
-#define RVA_FN_UPSCALE  0x29b51cu    /* expected value of that entry */
-#define RVA_DEPTH_SRV   0x34efab0u   /* ID3D11ShaderResourceView* of the hardware depth buffer (bound at t16) */
-#define RVA_VELOCITY_TEX 0x378f6d8u  /* CTexture* $VelocityObjects[2] (slot 1 = right eye); FINDINGS_KCD_CTEXTURE.md */
-#define RVA_STEREO_EYE  0x2ff12b4u   /* int: current eye index (0 mono) */
+/* --- per-build WHGame.dll offsets ---
+ * Every fixed WHGame.dll address the plugin uses, one row per game build; the RVA_* names below read from the selected
+ * row. select_build() picks the row once in hook_whgame() by reading (never writing) two identity checks: the renderer
+ * vtable slot +0xab8 holds that build's stretch function, and CSystem slots 111/112 hold its LoadXmlFromBuffer /
+ * LoadXmlFromFile (the same comparisons dlss_install and menu_xml_install make before hooking). Either check is enough,
+ * so a vtable already hooked by another mod does not hide the build; a 1/2 match is logged as partial. Every patch
+ * still checks its own bytes or slot before writing. With no matching row the build is unknown: only the
+ * pattern-searched grass fix and sharpening removal run, dlss_install / menu_xml_install are skipped and g_wh_base
+ * stays NULL, which turns off everything that reads WHGame.dll globals.
+ * Epic 1.9.8b row: from the Epic WHGame.dll (PE timestamp 0x69ccdca1, SizeOfImage 0x39e5000), each value matched to
+ * its use in code (patch-site bytes, RTTI vtables, gEnv stores, cvar registrations, call sites), not computed by a
+ * shift. The data shifts against Steam differ by group: renderer, depth SRV, camera matrices, bind records -0x5480;
+ * $VelocityObjects -0x5410; eye index -0x54a4; AA copy -0x5484; r_PostProcessGameFx/r_CustomVisions -0x54ec;
+ * gEnv -0x5040. Do not derive a new row from one shift.
+ * Not per build (shared by all rows, so a new build must re-check them too): the struct offsets R_*, R_DEVINFO,
+ * R_FULLSCREEN, PFX_MGR_OFF, CT_* and the vtable slot numbers (renderer, console, CryPak, post effects). They are
+ * unchanged in Epic 1.9.8b (the renderer's depth SRV member sits 0x29130 from the object in both builds). Addresses
+ * quoted in comments elsewhere in this file are Steam 1.9.8 ones. */
+typedef struct {
+    const char *name;
+    DWORD renderer, vt_upscale, fn_upscale, depth_srv, velocity_tex, stereo_eye, jitter_zero, aa_mode, plog, console, post_view, post_proj, bindrec, gamefx, customvis, velfmt_l, velfmt_r, csys_vt, fn_loadxml_file, fn_loadxml_buf, pcrypak, fn_onactivate;
+    BYTE ctx_l[23];      /* velocity_fmt_patch: the 20 bytes before and 3 at the left/mono creation site */
+    BYTE zero_ctx[16];   /* dlss_install: jne rel32 + mov al,1 + the 8-byte jitter zeroing */
+} WH_BUILD;
+static const WH_BUILD g_wh_builds[] = {
+    { .name = "Steam 1.9.8",
+      .renderer = 0x34c6980u, .vt_upscale = 0x23e9b68u, .fn_upscale = 0x29b51cu, .depth_srv = 0x34efab0u,
+      .velocity_tex = 0x378f6d8u, .stereo_eye = 0x2ff12b4u, .jitter_zero = 0x3e243fu, .aa_mode = 0x358fcc4u,
+      .plog = 0x29d1798u, .console = 0x29d1768u, .post_view = 0x34b95b8u, .post_proj = 0x34b95f8u,
+      .bindrec = 0x33ff908u, .gamefx = 0x3786b84u, .customvis = 0x3786b88u, .velfmt_l = 0x2020671u,
+      .velfmt_r = 0x20206bcu, .csys_vt = 0x268a6a8u, .fn_loadxml_file = 0xea3d98u, .fn_loadxml_buf = 0xea3d70u,
+      .pcrypak = 0x29d1710u, .fn_onactivate = 0x666a24u,
+      .ctx_l = { 0x44,0x8b,0x05,0xa4,0x52,0x4b,0x01, 0x48,0x8d,0x05,0x6d,0xf0,0x76,0x01, 0x8b,0x15,0x93,0x52,0x4b,0x01, 0x41,0xb1,0x0b },
+      .zero_ctx = { 0x0f,0x85,0x8c,0xcb,0x86,0x00,0xb0,0x01, 0x49,0x83,0xa7,0x20,0x0f,0x00,0x00,0x00 } },
+    { .name = "Epic 1.9.8b",
+      .renderer = 0x34c1500u, .vt_upscale = 0x23e17a8u, .fn_upscale = 0x29b74cu, .depth_srv = 0x34ea630u,
+      .velocity_tex = 0x378a2c8u, .stereo_eye = 0x2febe10u, .jitter_zero = 0x3e262fu, .aa_mode = 0x358a840u,
+      .plog = 0x29cc758u, .console = 0x29cc728u, .post_view = 0x34b4138u, .post_proj = 0x34b4178u,
+      .bindrec = 0x33fa488u, .gamefx = 0x3781698u, .customvis = 0x378169cu, .velfmt_l = 0x201cd35u,
+      .velfmt_r = 0x201cd80u, .csys_vt = 0x26818d8u, .fn_loadxml_file = 0xea06bcu, .fn_loadxml_buf = 0xea0694u,
+      .pcrypak = 0x29cc6d0u, .fn_onactivate = 0x666c14u,
+      .ctx_l = { 0x44,0x8b,0x05,0x60,0x37,0x4b,0x01, 0x48,0x8d,0x05,0x99,0xd5,0x76,0x01, 0x8b,0x15,0x4f,0x37,0x4b,0x01, 0x41,0xb1,0x0b },
+      .zero_ctx = { 0x0f,0x85,0xf8,0x92,0x86,0x00,0xb0,0x01, 0x49,0x83,0xa7,0x20,0x0f,0x00,0x00,0x00 } },
+};
+static const WH_BUILD *g_wh_build = &g_wh_builds[0];
+#define RVA_RENDERER    (g_wh_build->renderer)   /* CD3D9Renderer instance (static object) */
+#define RVA_VT_UPSCALE  (g_wh_build->vt_upscale)   /* renderer vtable entry +0xab8 */
+#define RVA_FN_UPSCALE  (g_wh_build->fn_upscale)    /* expected value of that entry */
+#define RVA_DEPTH_SRV   (g_wh_build->depth_srv)   /* ID3D11ShaderResourceView* of the hardware depth buffer (bound at t16) */
+#define RVA_VELOCITY_TEX (g_wh_build->velocity_tex)  /* CTexture* $VelocityObjects[2] (slot 1 = right eye); FINDINGS_KCD_CTEXTURE.md */
+#define RVA_STEREO_EYE  (g_wh_build->stereo_eye)   /* int: current eye index (0 mono) */
 #define ETF_R16G16F 0x0e            /* CryEngine eTF for R16G16_FLOAT (patched in for $VelocityObjects) */
 #define CT_DEVTEX 0x30u              /* CTexture+0x30 CDeviceTexture* -> +0 ID3D11Resource* */
 #define CT_WIDTH 0x48u               /* u16 width, +0x4a u16 height, +0x4e u8 eTF (0x0b = R8G8S) */
 #define CT_SRV 0xc0u                 /* default ID3D11ShaderResourceView* */
-#define RVA_JITTER_ZERO 0x3e243fu    /* and qword ptr [r15+0xf20], 0 (8 bytes) in the jitter generator */
-#define RVA_AA_MODE     0x358fcc4u   /* effective r_AntialiasingMode copy */
-#define RVA_PLOG        0x29d1798u   /* ILog* (gEnv->pLog); slot 2 = LogV(type, fmt, va_list), type 3 = eAlways -> game console + kcd.log (FINDINGS_KCD_LOG.md) */
+#define RVA_JITTER_ZERO (g_wh_build->jitter_zero)    /* and qword ptr [r15+0xf20], 0 (8 bytes) in the jitter generator */
+#define RVA_AA_MODE     (g_wh_build->aa_mode)   /* effective r_AntialiasingMode copy */
+#define RVA_PLOG        (g_wh_build->plog)   /* ILog* (gEnv->pLog); slot 2 = LogV(type, fmt, va_list), type 3 = eAlways -> game console + kcd.log (FINDINGS_KCD_LOG.md) */
 typedef void (*PFN_LogV)(void *log, int type, const char *fmt, char *va);
 static BYTE *g_wh_base;   /* tentative definition; the real one with its comment follows below */
 /* 0.7.2: every plugin log line also goes into the game's drop-down console and kcd.log, prefixed [KCDDLSS] (user: "same way the FPS fix
@@ -641,7 +686,7 @@ static void game_log(const char *line, int len)
     args[0] = (unsigned long long)(ULONG_PTR)buf;
     ((PFN_LogV)vt[2])(log, 3, "%s", (char *)args);
 }
-#define RVA_CONSOLE     0x29d1768u   /* IConsole* (gEnv->pConsole copy); GetCVar = vtable slot 23, ICVar::GetIVal = slot 2 */
+#define RVA_CONSOLE     (g_wh_build->console)   /* IConsole* (gEnv->pConsole copy); GetCVar = vtable slot 23, ICVar::GetIVal = slot 2 */
 #define R_DOWNSCALE_X 0x6764
 #define R_DOWNSCALE_Y 0x6768
 #define R_JITTER_X 0xf20
@@ -1248,8 +1293,8 @@ static void build_reprojection(float *M, const float *viewProjCur, const float *
  * row-major 4x4, row-vector convention). Its own "previous view" slot (renderer+0xaa0) is already overwritten with this
  * frame's view by the time the upscale runs, so we keep our own previous view AND previous projection (the game
  * ignores FOV changes; we do not). Returns 0 (zero motion, DLSS reset) on the first frame or after a camera cut. */
-#define RVA_POST_VIEW 0x34b95b8u
-#define RVA_POST_PROJ 0x34b95f8u
+#define RVA_POST_VIEW (g_wh_build->post_view)
+#define RVA_POST_PROJ (g_wh_build->post_proj)
 static float g_prev_view[16], g_prev_proj[16], g_prev_cam[3]; static int g_have_prev;
 static void cam_pos(const float *V, float *c)
 {
@@ -1300,7 +1345,7 @@ static UINT g_true_nw, g_true_nh;   /* 0.7.1: the real output size = the native-
 /* Stale-binding check (FINDINGS_KCD_COLORGRADING.md): CTexture::Apply skips the D3D bind when its per-slot record at
  * WHGame+0x33ff908 + slot*0x40 (+0x28 SRV) already matches. Compare the record with the live PS SRVs at hook time; a
  * frame where they differ (record non-null, live different) gets a bit per slot. Masks kept for the last 16 frames. */
-#define RVA_BINDREC 0x33ff908u
+#define RVA_BINDREC (g_wh_build->bindrec)
 static void bind_check(ID3D11DeviceContext *ctx)
 {
     ID3D11ShaderResourceView *live[16]; unsigned int m = 0, i; BYTE *rec = g_wh_base + RVA_BINDREC;
@@ -1323,8 +1368,8 @@ static void bind_check(ID3D11DeviceContext *ctx)
  * after CREPostProcess::mfDraw) and the last 16 states are printed on probe spikes. "fxoff Name" swaps the effect's
  * vptr to a private copy whose Preprocess always returns false; "fxon Name" restores it. */
 #define PFX_MGR_OFF 0xef68
-#define RVA_GAMEFX 0x3786b84u
-#define RVA_CUSTOMVIS 0x3786b88u
+#define RVA_GAMEFX (g_wh_build->gamefx)
+#define RVA_CUSTOMVIS (g_wh_build->customvis)
 #define FX_VT_SLOTS 24
 typedef const char *(*PFN_FxName)(void *fx);
 typedef float (*PFN_ParamF)(void *p);
@@ -2206,11 +2251,11 @@ static void hook_stretch(BYTE *self, BYTE draw)
 /* $VelocityObjects is created as eTF 0x0b R8G8S (8-bit, sqrt-encoded): 1-2 px error on a 1 px motion = useless for DLSS
  * (aliasing on moving objects, user 2026-11-08). Change the eTF immediate to 0x0e R16G16F at both creation sites
  * (left/mono 0x182020671 and the stereo right eye 0x1820206bc); the game's encode/decode math is unchanged, just lossless. */
-#define RVA_VELFMT_L 0x2020671u
-#define RVA_VELFMT_R 0x20206bcu
+#define RVA_VELFMT_L (g_wh_build->velfmt_l)
+#define RVA_VELFMT_R (g_wh_build->velfmt_r)
 static void velocity_fmt_patch(BYTE *base)
 {
-    static const BYTE ctx_l[23] = { 0x44,0x8b,0x05,0xa4,0x52,0x4b,0x01, 0x48,0x8d,0x05,0x6d,0xf0,0x76,0x01, 0x8b,0x15,0x93,0x52,0x4b,0x01, 0x41,0xb1,0x0b };
+    const BYTE *ctx_l = g_wh_build->ctx_l;
     static const BYTE ctx_r[8]  = { 0x41,0xb1,0x0b, 0x44,0x89,0x74,0x24,0x38 };
     BYTE *l = base + RVA_VELFMT_L, *r = base + RVA_VELFMT_R; DWORD old, tmp; int n = 0;
     if (!readable(l - 20, 23) || !readable(r, 8)) { LOGC(log_s("velocity: patch site unreadable: 8-bit velocity kept")); return; }
@@ -2224,7 +2269,7 @@ static void velocity_fmt_patch(BYTE *base)
 
 static void dlss_install(BYTE *base)
 {
-    static const BYTE zero_ctx[16] = { 0x0f,0x85,0x8c,0xcb,0x86,0x00,0xb0,0x01, 0x49,0x83,0xa7,0x20,0x0f,0x00,0x00,0x00 };
+    const BYTE *zero_ctx = g_wh_build->zero_ctx;
     static const BYTE nop8[8] = { 0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90 };
     BYTE *z = base + RVA_JITTER_ZERO, **slot = (BYTE **)(base + RVA_VT_UPSCALE); DWORD old, tmp;
     g_wh_base = base;
@@ -2293,10 +2338,10 @@ static void sharpen_patch(BYTE *base)
  * (slot 111). The "Unsupported" choices are added only when no upscaler exists (g_no_upscaler). Anything unexpected -> the
  * original call, the page is the stock one and the mode comes from KCDDLSS.ini. Replaces the Mods\KCDDLSS pak of BETA 1/2. */
 #include "menu_rows.h"
-#define RVA_CSYS_VT         0x268a6a8u   /* CSystem vtable (ISystem at offset 0, 213 slots) */
-#define RVA_FN_LOADXML_FILE 0xea3d98u    /* slot 112: XmlNodeRef *LoadXmlFromFile(this, XmlNodeRef *sret, const char *file, bool bReuseStrings) */
-#define RVA_FN_LOADXML_BUF  0xea3d70u    /* slot 111: XmlNodeRef *LoadXmlFromBuffer(this, XmlNodeRef *sret, const char *buf, size_t size, bool bReuseStrings) */
-#define RVA_PCRYPAK         0x29d1710u   /* ICryPak *gEnv->pCryPak */
+#define RVA_CSYS_VT         (g_wh_build->csys_vt)   /* CSystem vtable (ISystem at offset 0, 213 slots) */
+#define RVA_FN_LOADXML_FILE (g_wh_build->fn_loadxml_file)    /* slot 112: XmlNodeRef *LoadXmlFromFile(this, XmlNodeRef *sret, const char *file, bool bReuseStrings) */
+#define RVA_FN_LOADXML_BUF  (g_wh_build->fn_loadxml_buf)    /* slot 111: XmlNodeRef *LoadXmlFromBuffer(this, XmlNodeRef *sret, const char *buf, size_t size, bool bReuseStrings) */
+#define RVA_PCRYPAK         (g_wh_build->pcrypak)   /* ICryPak *gEnv->pCryPak */
 #define PAK_SLOT_FOPEN    37   /* FILE *FOpen(name, "rb", flags) */
 #define PAK_SLOT_FREAD    40   /* size_t FRead(buf, size, FILE *) -> bytes read; slots as used by the game's read-whole-file helper WHGame+0x237bb0 */
 #define PAK_SLOT_FGETSIZE 47
@@ -2416,7 +2461,7 @@ static void menu_xml_install(BYTE *base)
  * 1080p exclusive fullscreen): the swap chain IS rebuilt, but the routine minimizes the game window as well (both with a
  * deactivate+activate pair and with the activate transition alone), so it has no advantage over the kick. Kept only behind the
  * "kick" command of KCDDLSS.cmd for experiments; the automatic kick stays the 0.7.5 minimize/restore. */
-#define RVA_FN_ONACTIVATE 0x666a24u
+#define RVA_FN_ONACTIVATE (g_wh_build->fn_onactivate)
 #define R_DEVINFO   0x29968
 #define DI_ACTIVE   0x1e5   /* window-thread copy of the active state; DI+0x1e4 = the render thread's copy */
 #define R_FULLSCREEN 0x29c30
@@ -2437,20 +2482,42 @@ static int kick_activate(const char *why)
     return 1;
 }
 
+static int select_build(BYTE *base)
+{
+    unsigned int i;
+    for (i = 0; i < sizeof g_wh_builds / sizeof g_wh_builds[0]; i++) {
+        const WH_BUILD *b = &g_wh_builds[i]; int score = 0;
+        BYTE **up = (BYTE **)(base + b->vt_upscale), **cs = (BYTE **)(base + b->csys_vt);
+        if (readable((BYTE *)up, 8) && *up == base + b->fn_upscale) score++;
+        if (readable((BYTE *)cs, 113 * 8) && cs[111] == base + b->fn_loadxml_buf && cs[112] == base + b->fn_loadxml_file) score++;
+        if (score) {
+            g_wh_build = b;
+            LOG(log_s("WHGame.dll build: "); log_s(b->name); log_s(" ("); log_i(score);
+                log_s(score == 2 ? "/2 identity checks)" : "/2 identity checks: partial match, the other vtable is probably hooked by another mod)"));
+            return 1;
+        }
+    }
+    LOGC(log_s("WHGame.dll build: unknown (neither Steam 1.9.8 nor Epic 1.9.8b): DLSS, velocity, jitter and menu patches skipped"));
+    return 0;
+}
+
 static void hook_whgame(BYTE *base)
 {
     IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base; IMAGE_NT_HEADERS64 *nt; IMAGE_DATA_DIRECTORY *dir; IMAGE_IMPORT_DESCRIPTOR *imp;
-    FARPROC real_gpa; int done = 0;
+    FARPROC real_gpa; int done = 0, known;
     if (!base || base == g_hooked_base) return;
     LOG(log_s("WHGame.dll at "); log_x((ULONG_PTR)base));
     if (dos->e_magic != IMAGE_DOS_SIGNATURE) { LOGC(log_s("not a PE image: nothing changed")); return; }
     nt = (IMAGE_NT_HEADERS64 *)(base + dos->e_lfanew);
     if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) { LOGC(log_s("not a 64-bit PE image: nothing changed")); return; }
     if (nt->OptionalHeader.SizeOfImage < 0x3800000) { LOGC(log_s("WHGame.dll image too small for this build's offsets: nothing changed")); return; }
+    known = select_build(base);
     grass_patch(base);
     sharpen_patch(base);
-    dlss_install(base);
-    menu_xml_install(base);
+    if (known) {
+        dlss_install(base);
+        menu_xml_install(base);
+    }
     dir = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
     if (!dir->VirtualAddress) { LOGC(log_s("no import table: DLSS hook not installed")); return; }
     real_gpa = GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetProcAddress");

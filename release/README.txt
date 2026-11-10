@@ -1,5 +1,5 @@
 DLSS FOR KINGDOM COME: DELIVERANCE @VERSION@
-Kingdom Come: Deliverance (Steam, 1.9.8)
+Kingdom Come: Deliverance (Steam 1.9.8, Epic 1.9.8b)
 Author: mrtaxerman
 @OPTI@
 @OPTI@THIS IS THE DOWNLOAD WITH OPTISCALER @OPTI_VERSION@ INCLUDED, for AMD and Intel
@@ -26,8 +26,10 @@ REQUIREMENTS
 @OPTI@- Any DirectX 11 graphics card. FSR 4 needs a Radeon RX 7000 / 9000;
 @OPTI@  XeSS runs best on Intel Arc. Details: OPTISCALER.txt.
 - Windows, or Steam Deck / Linux with Proton (installer included).
-- Game version 1.9.8 (Steam). On any other version the plugin finds nothing
-  it knows, changes nothing and says so in KCDDLSS.log.
+- Game version 1.9.8 (Steam) or 1.9.8b (Epic Games Store). On any other
+  version the plugin says so in KCDDLSS.log and applies only the grass fix
+  and the sharpening removal (they find their code by pattern); DLSS and
+  the menu rows are skipped.
 
 FILES IN THIS ARCHIVE
 - install\KCDDLSS.asi: the mod, a plugin. When the game starts it hooks the
@@ -186,8 +188,10 @@ KNOWN BEHAVIOUR
 - The settings menu's Apply puts the game's own values back for a moment;
   the mod re-forces its render size and settings in the same frame. The
   resolution list and the quality presets work as before.
-- The mod talks to one game: KingdomCome.exe, Steam 1.9.8, 64-bit DX11.
-  Other versions get a one-line note in the log and no changes.
+- The mod talks to one game: KingdomCome.exe, Steam 1.9.8 or Epic 1.9.8b,
+  64-bit DX11.
+  Other versions get a one-line note in the log; only the grass fix and
+  the sharpening removal are applied there.
 
 FSR / XeSS THROUGH OPTISCALER (AMD, INTEL)
 @STD@Not included in this archive. OPTISCALER.txt has the download link and the

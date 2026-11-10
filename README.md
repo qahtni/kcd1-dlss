@@ -28,7 +28,7 @@ How it works in detail: [HOW-IT-WORKS.md](HOW-IT-WORKS.md).
 
 ## Requirements
 
-- Kingdom Come: Deliverance, Steam version 1.9.8, 64-bit DX11. On any other version the plugin finds nothing it knows, changes nothing and says so in its log.
+- Kingdom Come: Deliverance, Steam version 1.9.8 or Epic Games Store version 1.9.8b, 64-bit DX11. The plugin recognises the build at start (`WHGame.dll build:` line in its log); on any other version it says so in its log and applies only the two fixes that find their code by pattern (30 FPS grass, conversation sharpening); DLSS, the motion-vector and jitter patches and the menu rows are skipped.
 - NVIDIA GeForce RTX 20 series or newer with a current driver. Other cards: the OptiScaler download, see `release/OPTISCALER-included.txt`.
 - Steam Deck / Linux: Proton 9 or newer. DLSS needs the NVIDIA driver; AMD and Intel use OptiScaler, which on Linux is one Proton switch (a GE-Proton or Proton-CachyOS build with OptiScaler), nothing to copy.
 
@@ -66,7 +66,7 @@ After the game reaches the menu, `Bin\Win64\KCDDLSS.log` contains a line like `d
 - The first start after installing switches the game to native-resolution output; in exclusive fullscreen the picture can go black for a moment, the mod minimizes and restores the window to recover.
 - The game's AA option is forced off while the mod runs (`Prereq = 0` in the ini if you really want to manage it).
 - The menu rows are added in memory to the Advanced Graphics page (`Libs/UI/UIActions/MM_AdvancedGraphics.xml`) as the game loads it, whichever mod's copy of that page is active: no pak, no `mod_order.txt` entry. `MenuRows = 0` in the ini turns it off.
-- Tested on Windows 11 (RTX 4070: DLSS, and OptiScaler FSR / XeSS) and Linux with Proton (Bazzite with an RX 9070 XT and OptiScaler FSR 4; Steam Deck with OptiScaler). Not tested: GOG and Epic copies, Flatpak Steam and Heroic on real machines.
+- Tested on Windows 11 (RTX 4070: DLSS, and OptiScaler FSR / XeSS) and Linux with Proton (Bazzite with an RX 9070 XT and OptiScaler FSR 4; Steam Deck with OptiScaler). Epic 1.9.8b: confirmed in game (RTX 5070 Ti, Windows); its offsets were ported from its `WHGame.dll`. Steam 1.9.8 after the per-build table: unchanged by inspection (same values, same checks), not re-run. Not tested: GOG copies (1.9.8b on GOG may or may not be the same binary as Epic), Flatpak Steam and Heroic on real machines.
 
 ## Building from source
 
