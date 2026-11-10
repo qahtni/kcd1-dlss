@@ -90,6 +90,8 @@ goto :grass
 :foreign
 echo Loader: Bin\Win64\version.dll is already there and is a different file. Left alone.
 echo         If it is an ASI loader, the mod loads through it. Check Bin\Win64\KCDDLSS.log after a start.
+echo         No KCDDLSS.log after a start = that version.dll is not an ASI loader ^(a renamed OptiScaler or
+echo         another mod^): rename it to version.dll.old and run this installer again.
 
 :grass
 if exist "%B%\KCDGrassFix.asi" (
@@ -105,6 +107,7 @@ echo.
 echo Done. No launch options are needed on Windows. Start the game.
 echo Bin\Win64\KCDDLSS.log then shows "dlss: CreateFeature ... result 0x1" once the menu is up.
 echo DLSS mode: Options ^> Advanced Graphics ^> "DLSS / Upscaling" in the game, or Bin\Win64\KCDDLSS.ini.
+echo Not working? Double-click Report-Windows.bat in this folder and post the text it shows.
 @STD@echo AMD / Intel GPU: see README.txt, section "FSR / XeSS through OptiScaler".
 @OPTI@echo Upscaler: OptiScaler. In the game press Insert for its overlay ^(FSR or XeSS^). More: OPTISCALER.txt.
 echo.

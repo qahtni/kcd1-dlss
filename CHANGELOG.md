@@ -1,5 +1,17 @@
 # Changelog
 
+## BETA 4 (2026-11-10)
+
+Plugin build 0.8.1.
+
+- Fix: "Unsupported" on a GeForce system that also has an integrated GPU (or any other non-NVIDIA adapter). The game creates a device on every adapter while it enumerates them, and the first non-NVIDIA one switched the upscaling off for good. The decision is now made on the device the renderer really draws with, before the startup settings are applied.
+- `KCDDLSS.log` starts with an `env:` block for bug reports: Windows / Proton version, game build, the files in `Bin\Win64`, installed mods, shader cache size, OptiScaler settings, all graphics adapters and the loaded loader / proxy / driver dlls. A line is logged at 1000 and 20000 upscaled frames.
+- New `Report-Windows.bat`: changes nothing, collects the file list, a loader check, the graphics cards and the log into `KCDDLSS-report.txt` and opens it. It also explains a missing `KCDDLSS.log` (mod not loaded).
+- The log falls back to `%TEMP%\KCDDLSS.log` when `Bin\Win64` is not writable.
+- `Uninstall-Windows.bat`: the "is another .asi plugin left" test uses `if exist`, which also works under Wine's cmd.
+- The debug console commands `jtest`, `jfixx`/`jfixy`/`jfix`, `jsx`/`jsy` (jitter tests through `KCDDLSS.cmd`) are in the source.
+- Verified on the PC (RTX 4070: NVIDIA DLSS and the OptiScaler download, installer and report script on the real game folder) and on Bazzite (RX 9070 XT, FSR 4 through OptiScaler). The integrated-GPU case itself could not be reproduced on our machines.
+
 ## BETA 3 (2026-11-09)
 
 Plugin build 0.8.0.

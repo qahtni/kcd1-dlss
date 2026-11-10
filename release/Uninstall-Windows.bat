@@ -51,7 +51,10 @@ if not exist "%B%\version.dll" (echo Loader: no version.dll there.& goto :done)
 call :size "%B%\version.dll" CUR
 if not "%CUR%"=="%UAL_SIZE%" (echo Loader: Bin\Win64\version.dll is not the file this mod installs. Left alone.& goto :done)
 set "OTHER="
-for %%F in ("%B%\*.asi" "%B%\scripts\*.asi" "%B%\plugins\*.asi") do set "OTHER=1"
+rem "if exist" with a wildcard also works under Wine's cmd (the for form did not expand there)
+if exist "%B%\*.asi" set "OTHER=1"
+if exist "%B%\scripts\*.asi" set "OTHER=1"
+if exist "%B%\plugins\*.asi" set "OTHER=1"
 if defined OTHER (echo Loader: another .asi plugin is still in Bin\Win64. version.dll left in place for it.& goto :done)
 del /q "%B%\version.dll" "%B%\Ultimate-ASI-Loader-LICENSE.txt" 2>nul
 echo Loader: Bin\Win64\version.dll removed.

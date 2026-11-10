@@ -65,7 +65,7 @@ PY
 fi
 # 0.8.0: no Mods/KCDDLSS pak any more; the plugin adds the menu rows in memory (tools/asi/menu_rows.h from tools/menu-mod/MM_AdvancedGraphics.xml)
 fill() { sed -e "/^$DROP/d" -e "s/^$KEEP//" "$1" | sed -e "s/@OPTI_VERSION@/$OPTI_VERSION/g; s/@OPTI_SHA@/$OPTI_SHA/; s/@OPTI_SIZE@/$OPTI_SIZE/" -e "s/@VERSION@/$VER/g; s/@ASI_SHA@/$ASI_SHA/; s/@UAL_SHA@/$UAL_SHA/; s/@DLSS_SHA@/$DLSS_SHA/; s/@ASI_SIZE@/$(stat -c %s "$ASI")/; s/@UAL_SIZE@/$(stat -c %s "$UAL")/; s/@DLSS_SIZE@/$(stat -c %s "$DLSS")/; s/@DLSS_VERSION@/$DLSS_VERSION/g"; }
-for f in Install-Windows.bat Uninstall-Windows.bat README.txt OPTISCALER.txt; do src=$f; [ -n "$OPTI" ] && [ "$f" = OPTISCALER.txt ] && src=OPTISCALER-included.txt; fill "$R/$src" | sed 's/\r$//; s/$/\r/' > "$S/$f"; done
+for f in Install-Windows.bat Uninstall-Windows.bat Report-Windows.bat README.txt OPTISCALER.txt; do src=$f; [ -n "$OPTI" ] && [ "$f" = OPTISCALER.txt ] && src=OPTISCALER-included.txt; fill "$R/$src" | sed 's/\r$//; s/$/\r/' > "$S/$f"; done
 for f in Install-Linux-SteamDeck.sh Uninstall-Linux-SteamDeck.sh; do
   fill "$R/$f" | python3 -I -c 'import sys; s=sys.stdin.read(); py=open(sys.argv[1]).read().rstrip("\n"); assert s.count("@LAUNCH_OPTION_PY@\n")==1; sys.stdout.write(s.replace("@LAUNCH_OPTION_PY@\n", py+"\n"))' "$R/launch_option.py" > "$S/$f"
   chmod 755 "$S/$f"; bash -n "$S/$f"

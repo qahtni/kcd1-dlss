@@ -168,7 +168,14 @@ clean without the TAA blur. In the game, grass and foliage should not
 smear; if a moving object leaves a trail, tell the author which one.
 
 REPORTING A PROBLEM
-The shipped mod logs little. For a report: close the game, replace
+Windows: double-click Report-Windows.bat in this archive. It changes
+nothing, writes KCDDLSS-report.txt (files next to the game, loader check,
+graphics cards, the mod's log) and opens it: post that text. It also says
+why there is no KCDDLSS.log when the mod did not load at all.
+KCDDLSS.log starts with "env:" lines (game build, files in Bin\Win64,
+mods, graphics cards, loaded dlls): they are meant for reports.
+If Bin\Win64 cannot be written, the log is in %TEMP%\KCDDLSS.log.
+The shipped mod logs little otherwise. For a report: close the game, replace
 Bin\Win64\KCDDLSS.asi with debug\KCDDLSS.asi from this archive (same name,
 same place), start the game, reproduce the problem, close the game and
 send Bin\Win64\KCDDLSS.log (plus KCDDLSS.prev.log after a crash: the
@@ -227,6 +234,13 @@ GOOD TO KNOW
 
 CHANGES
 @VERSION@
+- Fix: "Unsupported" on a GeForce system that also has an integrated GPU
+  (or another non-NVIDIA adapter): the mod judged by the first adapter the
+  game listed. It now decides on the adapter the game really draws with.
+- KCDDLSS.log starts with an "env:" block for bug reports and counts the
+  upscaled frames; Report-Windows.bat collects everything into one text.
+- The log falls back to %TEMP%\KCDDLSS.log when Bin\Win64 is read-only.
+BETA 3
 - No more Mods\KCDDLSS pak: the two menu rows are added to the Advanced
   Graphics page in memory while the game loads it (works with other mods'
   copies of that page; MenuRows = 0 in the ini turns it off). The

@@ -24,7 +24,7 @@
 #define DBG 0   /* release build: diagnostics (probe, NGX chatter, post-effect tracing) compiled out, console gets the bare minimum */
 #define BUILD_TAG ""
 #endif
-#define PLUGIN_TITLE "KCD DLSS 0.8.0 (M3: DLSS modes, render presets, live mip bias; prerequisites forced + watchdog; r_DLSSMode/r_DLSSPreset menu cvars) + 30 FPS Grass Fix + Disable Forced Conversation Sharpening" BUILD_TAG
+#define PLUGIN_TITLE "KCD DLSS 0.8.1 (M3: DLSS modes, render presets, live mip bias; prerequisites forced + watchdog; r_DLSSMode/r_DLSSPreset menu cvars) + 30 FPS Grass Fix + Disable Forced Conversation Sharpening" BUILD_TAG
 #define NGX_VERSION_API 0x15u
 #define NGX_ENGINE_TYPE_CUSTOM 0
 #define NGX_FEATURE_SUPERSAMPLING 1
@@ -66,6 +66,7 @@ static WCHAR g_dir[MAX_PATH + 8];          /* folder of the plugin (Bin\Win64), 
  * preset: 0 Transformer, 1 CNN, 2 Default, 3 one letter (preset_val) for every mode; mipoff: added to log2(render/native) (NVIDIA/AMD -1.0, Intel 0) */
 static struct { int mipbias, objectmv, probe, quality, jitter, velpatch, dlss, mode, preset, preset_val, blackms, prereq, gifull, menurows; float sharpness, mipoff; char exec[512]; WCHAR ngxdll[64]; } g_cfg = { 1, 1, 1, -1, 1, 1, 1, -1, 0, 0, 0, 1, 1, 1, 0.0f, -1.0f, "", L"" };   /* BlackMs 0 since 0.7.1: the menu fades by itself (user 2026-11-08) */
 static int g_log_open;
+static int g_log_temp;   /* 0.8.1: the log went to %TEMP% because the plugin folder is not writable */
 static char g_line[600];
 static DWORD g_len;
 static int g_to_console;   /* set by LOGC: this line is also printed in the game console (ILog, "[KCDDLSS] " prefix) */
@@ -102,6 +103,12 @@ static void log_end(void)
         }
         h = CreateFileW(g_log_path, GENERIC_WRITE, FILE_SHARE_READ, NULL,
                         g_log_open ? OPEN_ALWAYS : CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h == INVALID_HANDLE_VALUE && !g_log_open && !g_log_temp) {   /* 0.8.1: Bin\Win64 not writable -> %TEMP%\KCDDLSS.log */
+            DWORD tn = GetTempPathW(MAX_PATH - 16, g_log_path);
+            g_log_temp = 1;
+            if (tn && tn < MAX_PATH - 16) { wcat(g_log_path, MAX_PATH, L"KCDDLSS.log"); h = CreateFileW(g_log_path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL); }
+            else g_log_path[0] = 0;
+        }
         if (h != INVALID_HANDLE_VALUE) {
             g_log_open = 1;
             SetFilePointer(h, 0, NULL, FILE_END);
@@ -259,6 +266,8 @@ static NGX_Result p_get_f(NGX_Parameter *p, const char *n, float *v) { return ((
 static NGX_Result p_get_p(NGX_Parameter *p, const char *n, void **v) { return ((VT_GetP)VT(p, VT_GET_VOIDP))(p, n, v); }
 
 static int g_core_from_game_dir;   /* NGX core came from the game folder (OptiScaler drop-in or a copied core) */
+static ID3D11DeviceContext *g_tick_ctx;   /* 0.8.1: the context the renderer draws with (last OMSetRenderTargets caller) */
+static int g_nv_seen;       /* 0.8.1: an NVIDIA device was created while an NGX core is loaded */
 static int g_no_upscaler;   /* 0.7.4: set at device creation when no NGX core / no NVIDIA + no drop-in: modes keep the native size */
 static struct {
     HMODULE core;
@@ -551,6 +560,97 @@ static UINT device_vendor(ID3D11Device *dev, WCHAR *desc, UINT desc_cap)
 
 static void hook_sampler_state(ID3D11Device *dev);
 static void hook_ctx(ID3D11DeviceContext *ctx); static void aa_pin_install(const char *src);
+/* ---- 0.8.1: environment block in the log, written once at the first device (support: which game build, which loader and
+ * proxy dlls, which files next to the game, which GPUs, which mods). Read-only; nothing here changes the game. ---- */
+static BYTE *g_wh_base;
+static const GUID IID_IDXGIFactory1_local = { 0x770aae78, 0xf26f, 0x4dba, { 0xa8, 0x29, 0x25, 0x3c, 0x83, 0xd1, 0xb3, 0x87 } };
+static WCHAR wlow(WCHAR c) { return (c >= L'A' && c <= L'Z') ? (WCHAR)(c + 32) : c; }
+static int wprefix_i(const WCHAR *s, const WCHAR *pre) { while (*pre) { if (wlow(*s) != wlow(*pre)) return 0; s++; pre++; } return 1; }
+static int wfind_i(const WCHAR *s, const WCHAR *sub) { for (; *s; s++) if (wprefix_i(s, sub)) return 1; return 0; }
+static void env_files(const WCHAR *sub, const WCHAR *pat, const char *label)
+{
+    static WCHAR path[MAX_PATH + 80]; WIN32_FIND_DATAW fd; HANDLE h; int n = 0;
+    path[0] = 0; wcat(path, MAX_PATH + 80, g_dir); wcat(path, MAX_PATH + 80, sub); wcat(path, MAX_PATH + 80, pat);
+    h = FindFirstFileW(path, &fd);
+    if (h == INVALID_HANDLE_VALUE) { LOG(log_s(label); log_s(" (none)")); return; }
+    EnterCriticalSection(&g_log_cs); log_s(label);
+    do {
+        if (fd.cFileName[0] == L'.' && (!fd.cFileName[1] || fd.cFileName[1] == L'.')) continue;
+        if (g_len > 470) { log_end(); log_s(label); n = 0; }
+        log_s(n++ ? ", " : " "); log_w(fd.cFileName);
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) { log_s(" "); log_u(fd.nFileSizeLow); }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h); log_end(); LeaveCriticalSection(&g_log_cs);
+}
+static void env_modules(void)
+{
+    static HMODULE mods[768]; static WCHAR p[MAX_PATH + 4], win[MAX_PATH + 4];
+    static const WCHAR *always[] = { L"\\dxgi.dll", L"\\d3d11.dll", L"\\d3d12.dll", L"\\version.dll", L"\\winmm.dll", L"\\dinput8.dll", L"\\dsound.dll", L"\\dbghelp.dll", L"\\wininet.dll", L"\\winhttp.dll" };
+    typedef BOOL (WINAPI *PFN_ENUM)(HANDLE, HMODULE *, DWORD, DWORD *);
+    PFN_ENUM en = (PFN_ENUM)(void *)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32EnumProcessModules");
+    DWORD need = 0, n, i, k; int show;
+    if (!en || !en(GetCurrentProcess(), mods, sizeof mods, &need)) { LOG(log_s("env: module list not available")); return; }
+    n = need / sizeof(HMODULE); if (n > 768) n = 768;
+    win[0] = 0; GetWindowsDirectoryW(win, MAX_PATH);
+    for (i = 0; i < n; i++) {
+        DWORD len = GetModuleFileNameW(mods[i], p, MAX_PATH);
+        if (!len || len >= MAX_PATH) continue;
+        show = !win[0] || !wprefix_i(p, win) || wfind_i(p, L"\\DriverStore\\");
+        for (k = 0; !show && k < sizeof always / sizeof always[0]; k++) if (len > wlen(always[k]) && wprefix_i(p + len - wlen(always[k]), always[k])) show = 1;
+        if (show) LOG(log_s("env: module "); log_w(p));
+    }
+    LOG(log_s("env: "); log_u(n); log_s(" modules loaded (shown: all outside the Windows folder, GPU driver files, and dxgi / d3d11 / version / winmm / dinput8 wherever they are)"));
+}
+static void env_adapters(void)
+{
+    typedef HRESULT (WINAPI *PFN_CF)(REFIID, void **);
+    HMODULE dx = GetModuleHandleW(L"dxgi.dll"); PFN_CF cf = dx ? (PFN_CF)(void *)GetProcAddress(dx, "CreateDXGIFactory1") : NULL;
+    IDXGIFactory1 *f = NULL; IDXGIAdapter1 *a = NULL; UINT i;
+    if (!cf || FAILED(cf(&IID_IDXGIFactory1_local, (void **)&f)) || !f) { LOG(log_s("env: adapter list not available")); return; }
+    for (i = 0; i < 8 && IDXGIFactory1_EnumAdapters1(f, i, &a) == S_OK && a; i++) {
+        DXGI_ADAPTER_DESC1 d; IDXGIOutput *o = NULL; UINT outs = 0;
+        if (SUCCEEDED(IDXGIAdapter1_GetDesc1(a, &d))) {
+            while (outs < 8 && IDXGIAdapter1_EnumOutputs(a, outs, &o) == S_OK && o) { IDXGIOutput_Release(o); o = NULL; outs++; }
+            LOG(log_s("env: adapter "); log_u(i); log_s(": \""); log_w(d.Description); log_s("\", vendor "); log_x(d.VendorId); log_s(", device "); log_x(d.DeviceId);
+                log_s(", "); log_u((DWORD)(d.DedicatedVideoMemory >> 20)); log_s(" MB, "); log_u(outs); log_s(outs == 1 ? " display" : " displays");
+                if (d.Flags & 2) log_s(", software"));
+        }
+        IDXGIAdapter1_Release(a); a = NULL;
+    }
+    IDXGIFactory1_Release(f);
+}
+static void env_log(void)
+{
+    static WCHAR p[MAX_PATH + 40], v[40]; static int done;
+    typedef LONG (WINAPI *PFN_VER)(OSVERSIONINFOW *); typedef const char *(*PFN_WINE)(void);
+    HMODULE nt = GetModuleHandleW(L"ntdll.dll"); PFN_VER rv = nt ? (PFN_VER)(void *)GetProcAddress(nt, "RtlGetVersion") : NULL;
+    PFN_WINE wv = nt ? (PFN_WINE)(void *)GetProcAddress(nt, "wine_get_version") : NULL; OSVERSIONINFOW os;
+    static const struct { const WCHAR *sec, *key; } keys[] = { { L"Upscalers", L"Dx11Upscaler" }, { L"FSR", L"Fsr4Update" }, { L"Menu", L"OverlayMenu" }, { L"Menu", L"ShortcutKey" }, { L"Spoofing", L"Dxgi" }, { L"Plugins", L"LoadAsiPlugins" } };
+    DWORD k;
+    if (done) return;
+    done = 1;
+    memset(&os, 0, sizeof os); os.dwOSVersionInfoSize = sizeof os;
+    if (rv && rv(&os) == 0) LOG(log_s("env: Windows "); log_u(os.dwMajorVersion); log_s("."); log_u(os.dwMinorVersion); log_s(" build "); log_u(os.dwBuildNumber);
+                               if (wv) { log_s(", Wine / Proton "); log_s(wv()); });
+    p[0] = 0; GetModuleFileNameW(NULL, p, MAX_PATH);
+    LOG(log_s("env: game "); log_w(p));
+    if (g_wh_base) { IMAGE_NT_HEADERS64 *nth = (IMAGE_NT_HEADERS64 *)(g_wh_base + ((IMAGE_DOS_HEADER *)g_wh_base)->e_lfanew);
+        LOG(log_s("env: WHGame.dll image size "); log_x(nth->OptionalHeader.SizeOfImage); log_s(", build stamp "); log_x(nth->FileHeader.TimeDateStamp);); }
+    env_files(L"\\", L"*.dll", "env: Bin\\Win64 dll:");
+    env_files(L"\\", L"*.asi*", "env: Bin\\Win64 asi:");
+    env_files(L"\\", L"*.ini", "env: Bin\\Win64 ini:");
+    env_files(L"\\..\\..\\Mods\\", L"*", "env: Mods:");
+    env_files(L"\\..\\..\\Engine\\", L"shadercache*", "env: Engine:");
+    p[0] = 0; wcat(p, MAX_PATH + 40, g_dir); wcat(p, MAX_PATH + 40, L"\\OptiScaler.ini");
+    if (GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES) {
+        EnterCriticalSection(&g_log_cs); log_s("env: OptiScaler.ini:");
+        for (k = 0; k < sizeof keys / sizeof keys[0]; k++) { v[0] = 0; GetPrivateProfileStringW(keys[k].sec, keys[k].key, L"(missing)", v, 40, p); log_s(" "); log_w(keys[k].key); log_s("="); log_w(v); }
+        log_end(); LeaveCriticalSection(&g_log_cs);
+    }
+    env_adapters();
+    env_modules();
+}
+
 static HRESULT WINAPI my_D3D11CreateDevice(IDXGIAdapter *a, D3D_DRIVER_TYPE dt, HMODULE sw, UINT flags, const D3D_FEATURE_LEVEL *fl, UINT nfl,
                                            UINT sdk, ID3D11Device **dev, D3D_FEATURE_LEVEL *outfl, ID3D11DeviceContext **ctx)
 {
@@ -562,14 +662,21 @@ static HRESULT WINAPI my_D3D11CreateDevice(IDXGIAdapter *a, D3D_DRIVER_TYPE dt, 
         if (!g_ngx.core) { g_ngx.core = ngx_load_core(); if (g_ngx.core && !ngx_resolve()) { LOGC(log_s("NGX core lacks required D3D11 exports: DLSS unavailable")); } }
         vendor = device_vendor(*dev, desc, 64);
         g_devices++;
+        env_log();
         LOG(log_s("  adapter vendor "); log_x(vendor); log_s(" \""); log_w(desc); log_s("\" (device #"); log_u((DWORD)g_devices); log_s(")"));
         aa_pin_install("device");
         /* 0.7.4: decide now whether any upscaler can run, so the modes keep the native render size otherwise (Steam Deck without
          * the OptiScaler Proton, 2026-11-08: the plugin set 640x400 and the game showed its own blocky stretch) */
-        if (!g_no_upscaler && vendor && vendor != 0x1414 && (!g_ngx.core || (vendor != 0x10de && !g_core_from_game_dir))) {
+        if (vendor == 0x10de && g_ngx.core) {   /* 0.8.1: an NVIDIA device takes the provisional "no upscaler" of another adapter back */
+            g_nv_seen = 1;
+            if (g_no_upscaler) { g_no_upscaler = 0; LOG(log_s("dlss: NVIDIA adapter found after one without an upscaler: upscaling possible again")); }
+        } else if (!g_no_upscaler && !(g_nv_seen && g_ngx.core) && vendor && vendor != 0x1414 && (!g_ngx.core || (vendor != 0x10de && !g_core_from_game_dir))) {
+            /* 0.8.1 (BUG-3): provisional only. The game makes a device on every adapter while it enumerates them (an integrated
+             * GPU next to a GeForce card landed here and switched the upscaling off for good); upscaler_decide() settles it
+             * on the device the renderer really draws with, before the startup settings are applied. */
             g_no_upscaler = 1;
-            LOGC(log_s("dlss: "); log_s(!g_ngx.core ? "no NGX core found" : "not an NVIDIA adapter and no OptiScaler / drop-in core");
-                 log_s(": upscaling off, the render size stays native (AMD / Intel: see OPTISCALER.txt)"));
+            LOG(log_s("dlss: "); log_s(!g_ngx.core ? "no NGX core found" : "this adapter is not NVIDIA and there is no OptiScaler / drop-in core");
+                log_s(": no upscaling on it (decided for good once the renderer draws)"));
         }
         /* NGX is initialised lazily on the device the renderer really uses (first upscaled frame, see dlss_frame) */
         if (vendor != 0x1414) {
@@ -1141,6 +1248,43 @@ static void dump_frame(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11Resour
         ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)st, (ID3D11Resource *)g_dl.out); dump_ppm(ctx, st, od.Width, od.Height, L"out", od.Format == 87 || od.Format == 91); REL(st);
     } else LOG(log_s("dump: staging texture for the output failed"));
 }
+/* jitter test (2026-11-09, user: "jitter is not creating new detail"): `jtest N` copies the DLSS colour input of the next N
+ * frames into staging textures (cheap, no stall between frames), records the jitter the plugin reported to DLSS for each
+ * frame plus the renderer's jitter float2 and the m20/m21 of the jittered (R+0x160) and unjittered (post snapshot)
+ * projection, then writes KCDDLSS_jt_NN.ppm and one log line per frame. `jfixx v` / `jfixy v` hold a fixed jitter
+ * (pixels), `jfix off` returns to the Halton sequence. */
+#define JT_MAX 32
+static float g_jt_sx = -1.0f, g_jt_sy = 1.0f;   /* test: factors on the jitter reported to the upscaler (`jsx v`, `jsy v`) */
+static struct { int want, n, fixed; float fx, fy; ID3D11Texture2D *st[JT_MAX]; float jx[JT_MAX], jy[JT_MAX], rx[JT_MAX], ry[JT_MAX], p20[JT_MAX], p21[JT_MAX], u20[JT_MAX], u21[JT_MAX]; int bgra; } g_jt;
+static void jt_frame(ID3D11Device *dev, ID3D11DeviceContext *ctx, BYTE *self, ID3D11Resource *col_res, const D3D11_TEXTURE2D_DESC *cd)
+{
+    int k = g_jt.n, i; const float *U = (const float *)(g_wh_base + 0x34b95f8u);
+    g_jt.bgra = (cd->Format == 87 || cd->Format == 88 || cd->Format == 90 || cd->Format == 91);
+    if (k < g_jt.want && k < JT_MAX) {
+        if (!probe_tex(dev, cd->Width, cd->Height, cd->Format, 0, D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ, &g_jt.st[k])) { LOG(log_s("jtest: staging texture failed")); g_jt.want = k; }
+        else {
+            ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)g_jt.st[k], col_res);
+            g_jt.jx[k] = g_dl.jx; g_jt.jy[k] = g_dl.jy;
+            g_jt.rx[k] = *(float *)(self + 0xf20); g_jt.ry[k] = *(float *)(self + 0xf24);
+            g_jt.p20[k] = *(float *)(self + 0x180); g_jt.p21[k] = *(float *)(self + 0x184);
+            g_jt.u20[k] = U[8]; g_jt.u21[k] = U[9];
+            g_jt.n = ++k;
+        }
+    }
+    if (k < g_jt.want) return;
+    for (i = 0; i < k; i++) {
+        WCHAR tag[8]; float hw = (float)cd->Width * 500.0f, hh = (float)cd->Height * 500.0f;
+        tag[0] = 'j'; tag[1] = 't'; tag[2] = '_'; tag[3] = (WCHAR)('0' + i / 10); tag[4] = (WCHAR)('0' + i % 10); tag[5] = 0;
+        LOG(log_s("jtest: frame "); log_i(i); log_s(" reported jitter mpx "); log_i((int)(g_jt.jx[i] * 1000)); log_s(" "); log_i((int)(g_jt.jy[i] * 1000));
+            log_s(" | renderer f20/f24 as mpx "); log_i((int)(g_jt.rx[i] * hw)); log_s(" "); log_i((int)(g_jt.ry[i] * hh));
+            log_s(" | proj R+0x160 m20/m21 as mpx "); log_i((int)(g_jt.p20[i] * hw)); log_s(" "); log_i((int)(g_jt.p21[i] * hh));
+            log_s(" | unjittered m20/m21 as mpx "); log_i((int)(g_jt.u20[i] * hw)); log_s(" "); log_i((int)(g_jt.u21[i] * hh)));
+        dump_ppm(ctx, g_jt.st[i], cd->Width, cd->Height, tag, g_jt.bgra);
+        REL(g_jt.st[i]); g_jt.st[i] = NULL;
+    }
+    LOG(log_s("jtest: done, "); log_i(k); log_s(" frames"));
+    g_jt.want = 0; g_jt.n = 0;
+}
 #if DBG
 /* called inside the saved-state window, after EvaluateFeature */
 static void probe_frame(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *csrv, ID3D11Resource *col_res, const D3D11_TEXTURE2D_DESC *cd)
@@ -1516,7 +1660,7 @@ static void dlss_frame(BYTE *self)
             NGX_Parameter *p = g_dl.params;
             p_set_p(p, "Color", col_res); p_set_p(p, "Output", (ID3D11Resource *)g_dl.out);
             p_set_p(p, "Depth", dep_res); p_set_p(p, "MotionVectors", (ID3D11Resource *)g_dl.mv);
-            p_set_f(p, "Jitter.Offset.X", -g_dl.jx); p_set_f(p, "Jitter.Offset.Y", g_dl.jy);
+            p_set_f(p, "Jitter.Offset.X", g_jt_sx * g_dl.jx); p_set_f(p, "Jitter.Offset.Y", g_jt_sy * g_dl.jy);
             p_set_f(p, "MV.Scale.X", 1.0f); p_set_f(p, "MV.Scale.Y", 1.0f);
             p_set_i(p, "Reset", g_dl.reset);
             p_set_f(p, "Sharpness", g_cfg.sharpness);
@@ -1531,10 +1675,12 @@ static void dlss_frame(BYTE *self)
             r = g_ngx.EvaluateFeature(ctx, g_dl.feature, p, NULL);
             if (r == NGX_OK) probe_frame(dev, ctx, csrv, col_res, &cd);
             if (r == NGX_OK && g_dump_req) dump_frame(dev, ctx, col_res, &cd);
+            if (r == NGX_OK && g_jt.want) jt_frame(dev, ctx, self, col_res, &cd);
             ctx_restore(ctx, &st);
             if (r == NGX_OK) {
                 ID3D11DeviceContext_CopyResource(ctx, out_res, (ID3D11Resource *)g_dl.out);
                 if (g_dl.hold > 0) g_dl.hold--; else g_dl.reset = 0;   /* keep resetting ~0.5 s after a cut/load (stale history trace) */
+                if (g_dl.frames == 1000 || g_dl.frames == 20000) LOG(log_s("dlss: "); log_u(g_dl.frames); log_s(" frames upscaled so far, "); log_u((DWORD)g_dl.errs); log_s(" errors"));
                 if (g_dl.frames < 2) LOG(log_s("dlss: frame "); log_u(g_dl.frames); log_s(" evaluated and copied to the target; samplers so far "); log_u(g_css_total); log_s(" ("); log_u(g_css_biased); log_s(" biased), jitter "); log_i((int)(g_dl.jx * 1000)); log_s("/"); log_i((int)(g_dl.jy * 1000)); log_s(" mpx"));
             } else {
                 dl_fail("EvaluateFeature failed (result logged next)");
@@ -1547,6 +1693,7 @@ static void dlss_frame(BYTE *self)
             /* jitter for the NEXT frame: pixels -> the renderer's NDC float2 */
             g_dl.phase = (g_dl.phase + 1) % g_dl.phases;
             sx = halton((unsigned)g_dl.phase + 1, 2) - 0.5f; sy = halton((unsigned)g_dl.phase + 1, 3) - 0.5f;
+            if (g_jt.fixed) { sx = g_jt.fx; sy = g_jt.fy; }
             dsx = *(float *)(self + R_DOWNSCALE_X); dsy = *(float *)(self + R_DOWNSCALE_Y);
             if (!(dsx > 0.01f && dsx < 100.0f)) dsx = 1.0f;
             if (!(dsy > 0.01f && dsy < 100.0f)) dsy = 1.0f;
@@ -1667,6 +1814,11 @@ static void exec_commands(char *p, const char *src)
         }
         if (streq(name, "blink")) { g_blink_end = GetTickCount() + (DWORD)(parse_num(val) * 1000.0f); LOG(log_s("exec("); log_s(src); log_s("): blink test: 2 s black / 2 s normal for "); log_s(val); log_s(" s")); continue; }
         if (streq(name, "black")) { black_ms((int)parse_num(val)); LOG(log_s("exec("); log_s(src); log_s("): black-out for "); log_i((int)parse_num(val)); log_s(" ms")); continue; }
+        if (streq(name, "jtest")) { int n = (int)parse_num(val); if (n < 1) n = 16; if (n > JT_MAX) n = JT_MAX; g_jt.n = 0; g_jt.want = n; LOG(log_s("exec("); log_s(src); log_s("): jitter test, "); log_i(n); log_s(" frames")); continue; }
+        if (streq(name, "jsx") || streq(name, "jsy")) { if (name[2] == 'x') g_jt_sx = parse_num(val); else g_jt_sy = parse_num(val); g_dl.reset = 1; g_dl.hold = 5; LOG(log_s("exec("); log_s(src); log_s("): reported jitter factors x1000: "); log_i((int)(g_jt_sx * 1000)); log_s(" "); log_i((int)(g_jt_sy * 1000))); continue; }
+        if (streq(name, "jfixx")) { g_jt.fx = parse_num(val); g_jt.fixed = 1; LOG(log_s("exec("); log_s(src); log_s("): fixed jitter x mpx "); log_i((int)(g_jt.fx * 1000))); continue; }
+        if (streq(name, "jfixy")) { g_jt.fy = parse_num(val); g_jt.fixed = 1; LOG(log_s("exec("); log_s(src); log_s("): fixed jitter y mpx "); log_i((int)(g_jt.fy * 1000))); continue; }
+        if (streq(name, "jfix")) { g_jt.fixed = 0; LOG(log_s("exec("); log_s(src); log_s("): fixed jitter off (Halton)")); continue; }
         if (streq(name, "dump")) { g_dump_req = 1; LOG(log_s("exec("); log_s(src); log_s("): dump of the DLSS input and output requested (KCDDLSS_in.ppm / KCDDLSS_out.ppm)")); continue; }
         cv = ((PFN_GetCVar)VT(console, 23))(console, name);
         if (query == 2) {
@@ -1921,10 +2073,28 @@ static void prereq_apply(const char *src)
     if (g_cfg.prereq) { for (i = 0; PREREQ_CMDS[i] && i < 255; i++) buf[i] = PREREQ_CMDS[i]; buf[i] = 0; exec_commands(buf, src); }
     if (g_cfg.gifull) { for (i = 0; GI_CMDS[i] && i < 255; i++) buf[i] = GI_CMDS[i]; buf[i] = 0; exec_commands(buf, src); }
 }
+/* 0.8.1 (BUG-3): can an upscaler run? Decided on the device the renderer draws with, not on the adapters the game only enumerates. */
+static void upscaler_decide(void)
+{
+    ID3D11Device *dev = NULL; WCHAR desc[64]; UINT vendor; int no;
+    if (!g_tick_ctx) return;
+    ID3D11DeviceContext_GetDevice(g_tick_ctx, &dev);
+    if (!dev) return;
+    vendor = device_vendor(dev, desc, 64);
+    ID3D11Device_Release(dev);
+    if (!vendor || vendor == 0x1414) return;
+    no = !g_ngx.core || (vendor != 0x10de && !g_core_from_game_dir);
+    LOG(log_s("dlss: the renderer draws on vendor "); log_x(vendor); log_s(" \""); log_w(desc); log_s("\": upscaler "); log_s(no ? "not available" : "available");
+        if (no != g_no_upscaler) log_s(g_no_upscaler ? " (another adapter without one was only enumerated)" : " (changed)"));
+    g_no_upscaler = no;
+    if (no) LOGC(log_s("dlss: "); log_s(!g_ngx.core ? "no NGX core found" : "not an NVIDIA adapter and no OptiScaler / drop-in core");
+                 log_s(": upscaling off, the render size stays native (AMD / Intel: see OPTISCALER.txt)"));
+}
 static void cvars_exec_once(void)
 {
     if (g_startup_done) return;
     if (!console_ptr()) return;   /* retry next frame */
+    upscaler_decide();
     prereq_apply("init");
     LOG(log_s("exec(init): renderer AA mode copy "); log_i(*(int *)(g_wh_base + RVA_AA_MODE)); log_s(" (0 = the game's SMAA/TAA is off, DLSS does the AA)"));
     g_startup_done = 1;
@@ -2140,7 +2310,7 @@ static void rt_track(ID3D11RenderTargetView *const *rtvs, UINT n)
     REL(res);
     g_rt_native = native;
 }
-static void STDMETHODCALLTYPE my_OMSetRT(ID3D11DeviceContext *c, UINT n, ID3D11RenderTargetView *const *rt, ID3D11DepthStencilView *ds) { rt_track(rt, n); frame_tick(); g_ctxh[ctxh_find(c)].omrt(c, n, rt, ds); }
+static void STDMETHODCALLTYPE my_OMSetRT(ID3D11DeviceContext *c, UINT n, ID3D11RenderTargetView *const *rt, ID3D11DepthStencilView *ds) { rt_track(rt, n); g_tick_ctx = c; frame_tick(); g_ctxh[ctxh_find(c)].omrt(c, n, rt, ds); }
 static void STDMETHODCALLTYPE my_OMSetRTUAV(ID3D11DeviceContext *c, UINT n, ID3D11RenderTargetView *const *rt, ID3D11DepthStencilView *ds, UINT us, UINT nu, ID3D11UnorderedAccessView *const *uav, const UINT *ic)
 { if (n != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL) rt_track(rt, n); g_ctxh[ctxh_find(c)].omrtuav(c, n, rt, ds, us, nu, uav, ic); }
 static const WCHAR *mod_name(ULONG_PTR addr, ULONG_PTR *base, WCHAR *buf, int n);
