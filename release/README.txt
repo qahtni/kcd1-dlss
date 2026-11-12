@@ -41,6 +41,8 @@ FILES IN THIS ARCHIVE
 @OPTI@  install\OptiScaler\Licenses. OPTISCALER.txt says where the source code is.
 - install\version.dll: Ultimate ASI Loader 10.0.2 by ThirteenAG (MIT
   licence, install\Ultimate-ASI-Loader-LICENSE.txt). It loads .asi plugins.
+  The installer also puts a second copy next to it as dinput8.dll, for PCs
+  where another program makes the game skip version.dll.
 - debug\KCDDLSS.asi: the same mod with full diagnostics in KCDDLSS.log.
   Only for bug reports, see REPORTING A PROBLEM.
 - Install-Windows.bat, Uninstall-Windows.bat
@@ -91,10 +93,12 @@ To open the game folder: in Steam, right-click Kingdom Come: Deliverance >
 Manage > Browse local files.
 @STD@1. Copy install\KCDDLSS.asi, install\KCDDLSS.ini, install\nvngx_dlss.dll
 @STD@   and install\version.dll into Bin\Win64 (the folder with KingdomCome.exe).
+@STD@   Copy version.dll a second time and name the copy dinput8.dll.
 @OPTI@1. Copy install\KCDDLSS.asi, install\KCDDLSS.ini, install\version.dll and
 @OPTI@   the contents of install\OptiScaler (not its Licenses folder) into Bin\Win64
 @OPTI@   (the folder with KingdomCome.exe). In Bin\Win64\KCDDLSS.ini set the line
-@OPTI@   NgxDll = OptiScaler.dll.
+@OPTI@   NgxDll = OptiScaler.dll. Copy version.dll a second time and name the
+@OPTI@   copy dinput8.dll.
    Coming from BETA 1 or 2: delete the folder Mods\KCDDLSS (and its line in
    Mods\mod_order.txt); the plugin draws the menu rows itself now.
 2. Steam Deck / Linux only: set the game's launch options to
@@ -142,8 +146,8 @@ Bin\Win64\KCDDLSS.log.
 SETTINGS (Bin\Win64\KCDDLSS.ini, read at every start)
 Mode = Performance (default), Balanced, Quality, UltraQuality (0.83 render
   scale, DLSS anti-aliasing with the least upscaling), UltraPerformance, Native
-  (DLSS off, the game renders at your screen size) or Auto (keeps the
-  game's own resolution, Quality = picks the DLSS quality value). The menu
+  (DLSS off, the game renders at your screen size). An old "Mode = Auto"
+  line now starts as Quality. The menu
   row above writes this line. Render sizes follow NVIDIA's values: Quality
   2560x1440, Balanced 2227x1253, Performance 1920x1080, Ultra Performance
   1280x720 at 4K; Ultra Quality is the mod's own 0.83 (3187x1793 at 4K).
@@ -211,12 +215,12 @@ UNINSTALL
   (Steam Deck / Linux, with Steam closed). Uninstall-Windows.bat /
   Uninstall-Linux-SteamDeck.sh in the extracted archive do the same. They
   remove KCDDLSS.asi, KCDDLSS.ini, KCDDLSS.log and the licence texts,
-  remove nvngx_dlss.dll and version.dll only if they are the shipped files,
+  remove nvngx_dlss.dll, version.dll and dinput8.dll only if they are the shipped files,
   remove an old Mods\KCDDLSS of BETA 1/2 (and its mod_order.txt line), and rename
   KCDGrassFix.asi.off back to KCDGrassFix.asi. On Linux they
   also remove the launch option and the prefix setting (backups are kept).
 @OPTI@  The OptiScaler files go too (if OptiScaler.dll is the shipped one).
-- By hand: delete those files from Bin\Win64 (keep version.dll if you use
+- By hand: delete those files from Bin\Win64 (keep version.dll and dinput8.dll if you use
   other .asi mods). On Linux also remove WINEDLLOVERRIDES="version=n,b"
   from the launch options.
 Nothing else was changed: the game's own settings were only set in memory.

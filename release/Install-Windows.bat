@@ -80,6 +80,13 @@ if exist "%B%\KCDDLSS.ini" (
 @OPTI@set "KINI=%B%\KCDDLSS.ini"
 @OPTI@powershell -NoProfile -ExecutionPolicy Bypass -Command "$f=$env:KINI; $n=0; $t=@([IO.File]::ReadAllLines($f) | ForEach-Object { if ($_ -match '^\s*NgxDll\s*=') { $n++; 'NgxDll = OptiScaler.dll' } else { $_ } }); if ($n -eq 0) { $t += 'NgxDll = OptiScaler.dll' }; [IO.File]::WriteAllLines($f, $t)" >nul 2>&1
 @OPTI@findstr /r /i /c:"^NgxDll = OptiScaler\.dll" "%KINI%" >nul && echo Settings: KCDDLSS.ini set to NgxDll = OptiScaler.dll ^(the mod uses OptiScaler^). || echo Settings: could not edit KCDDLSS.ini. Set the line NgxDll = OptiScaler.dll in Bin\Win64\KCDDLSS.ini yourself.
+rem The loader goes in twice: on some PCs another program loads the Windows version.dll first and ours is skipped
+rem (no KCDDLSS.log, no error). The game also asks for dinput8.dll by name, so the same file under that name is the fallback.
+set "CUR2="
+if exist "%B%\dinput8.dll" call :size "%B%\dinput8.dll" CUR2
+if not defined CUR2 copy /y /b "%SELF%\install\version.dll" "%B%\dinput8.dll" >nul && echo Loader: Bin\Win64\dinput8.dll copied, a second copy of the loader.
+if defined CUR2 if "%CUR2%"=="%UAL_SIZE%" copy /y /b "%SELF%\install\version.dll" "%B%\dinput8.dll" >nul
+if defined CUR2 if not "%CUR2%"=="%UAL_SIZE%" echo Loader: Bin\Win64\dinput8.dll is already there and is a different file. Left alone.
 set "CUR="
 if exist "%B%\version.dll" call :size "%B%\version.dll" CUR
 if defined CUR if not "%CUR%"=="%UAL_SIZE%" goto :foreign

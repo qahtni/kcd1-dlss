@@ -24,7 +24,7 @@
 #define DBG 0   /* release build: diagnostics (probe, NGX chatter, post-effect tracing) compiled out, console gets the bare minimum */
 #define BUILD_TAG ""
 #endif
-#define PLUGIN_TITLE "KCD DLSS 0.8.1 (M3: DLSS modes, render presets, live mip bias; prerequisites forced + watchdog; r_DLSSMode/r_DLSSPreset menu cvars) + 30 FPS Grass Fix + Disable Forced Conversation Sharpening" BUILD_TAG
+#define PLUGIN_TITLE "KCD DLSS 0.8.2 (M3: DLSS modes, render presets, live mip bias; prerequisites forced + watchdog; r_DLSSMode/r_DLSSPreset menu cvars) + 30 FPS Grass Fix + Disable Forced Conversation Sharpening" BUILD_TAG
 #define NGX_VERSION_API 0x15u
 #define NGX_ENGINE_TYPE_CUSTOM 0
 #define NGX_FEATURE_SUPERSAMPLING 1
@@ -64,8 +64,9 @@ static WCHAR g_dir[MAX_PATH + 8];          /* folder of the plugin (Bin\Win64), 
 /* KCDDLSS.ini next to the plugin: Key = Value per line. Defaults below. */
 /* mode: -1 Auto (the game's resolution decides), else the NGX PerfQuality value (0 Performance, 1 Balanced, 2 Quality, 3 UltraPerformance, 4 UltraQuality [0.7.4: 0.83 render scale, factor table only], 5 Native/DLAA);
  * preset: 0 Transformer, 1 CNN, 2 Default, 3 one letter (preset_val) for every mode; mipoff: added to log2(render/native) (NVIDIA/AMD -1.0, Intel 0) */
-static struct { int mipbias, objectmv, probe, quality, jitter, velpatch, dlss, mode, preset, preset_val, blackms, prereq, gifull, menurows; float sharpness, mipoff; char exec[512]; WCHAR ngxdll[64]; } g_cfg = { 1, 1, 1, -1, 1, 1, 1, -1, 0, 0, 0, 1, 1, 1, 0.0f, -1.0f, "", L"" };   /* BlackMs 0 since 0.7.1: the menu fades by itself (user 2026-11-08) */
+static struct { int mipbias, objectmv, probe, quality, jitter, velpatch, dlss, mode, preset, preset_val, blackms, prereq, gifull, menurows, saveres; float sharpness, mipoff; char exec[512]; WCHAR ngxdll[64]; } g_cfg = { 1, 1, 1, -1, 1, 1, 1, -1, 0, 0, 0, 1, 1, 1, 1, 0.0f, -1.0f, "", L"" };   /* BlackMs 0 since 0.7.1: the menu fades by itself (user 2026-11-08) */
 static int g_log_open;
+static int g_vdil = -1;   /* 0.8.2: VelocityDilate (-1 auto by render height, 0 off, 1..4 pixels), see the MV pass */
 static int g_log_temp;   /* 0.8.1: the log went to %TEMP% because the plugin folder is not writable */
 static char g_line[600];
 static DWORD g_len;
@@ -196,12 +197,14 @@ static void cfg_load(void)
         v = eq + 1; i = (int)(eq - k); while (i > 0 && (k[i - 1] == ' ' || k[i - 1] == '\t')) i--; k[i] = 0;
         if (ci_eq(k, "mipbias")) g_cfg.mipbias = (int)parse_num(v);
         else if (ci_eq(k, "objectmv")) g_cfg.objectmv = (int)parse_num(v);
+        else if (ci_eq(k, "velocitydilate")) { g_vdil = (int)parse_num(v); if (g_vdil < -1) g_vdil = -1; if (g_vdil > 4) g_vdil = 4; }
         else if (ci_eq(k, "probe")) g_cfg.probe = (int)parse_num(v);
         else if (ci_eq(k, "quality")) g_cfg.quality = (int)parse_num(v);
         else if (ci_eq(k, "sharpness")) g_cfg.sharpness = parse_num(v);
         else if (ci_eq(k, "jitter")) g_cfg.jitter = (int)parse_num(v);
         else if (ci_eq(k, "velocitypatch")) g_cfg.velpatch = (int)parse_num(v);
         else if (ci_eq(k, "menurows")) g_cfg.menurows = (int)parse_num(v);
+        else if (ci_eq(k, "saveoutputres")) g_cfg.saveres = (int)parse_num(v);
         else if (ci_eq(k, "dlss")) g_cfg.dlss = (int)parse_num(v);
         else if (ci_eq(k, "mode")) { int m = mode_parse(cfg_word(v)); if (m != -2) g_cfg.mode = m; }
         else if (ci_eq(k, "preset")) { int pv = 0, pk = preset_parse(cfg_word(v), &pv); if (pk >= 0) { g_cfg.preset = pk; g_cfg.preset_val = pv; } }
@@ -773,6 +776,7 @@ static struct {
     int quality, phases, phase, reset, hold, disabled;
     unsigned int frames, errs;
     float jx, jy;             /* pixel jitter in effect for the frame being rendered now */
+    float pjx, pjy;           /* 0.8.2: the jitter of the frame before (object velocity carries the difference, see g_vj) */
 } g_dl;
 
 /* the saved part of the immediate-context state around EvaluateFeature (the game caches its D3D state and would
@@ -1000,7 +1004,7 @@ static int ensure_feature(ID3D11Device *dev, ID3D11DeviceContext *ctx, UINT rw, 
     g_dl.phases = (int)(8.0f * ((float)nw / (float)rw) * ((float)nh / (float)rh));
     if (g_dl.phases < 8) g_dl.phases = 8;
     if (g_dl.phases > 64) g_dl.phases = 64;
-    g_dl.phase = 0; g_dl.reset = 1; g_dl.jx = g_dl.jy = 0;
+    g_dl.phase = 0; g_dl.reset = 1; g_dl.jx = g_dl.jy = 0; g_dl.pjx = g_dl.pjy = 0;
     LOG(log_s("dlss: ready, output format "); log_u(fmt); log_s(" (ours "); log_u(uav_format(fmt)); log_s("), "); log_i(g_dl.phases); log_s(" jitter phases"));
     return 1;
 }
@@ -1013,18 +1017,27 @@ static int ensure_feature(ID3D11Device *dev, ID3D11DeviceContext *ctx, UINT rw, 
  * milestone replaces the camera vector. All D3D state we touch is saved/restored around the pass. */
 static const char MV_HLSL[] =
 "#pragma pack_matrix(row_major)\n"
-"cbuffer C : register(b0) { float4x4 M; float2 size; float2 velSize; float useVel; float3 pad; };\n"
+"cbuffer C : register(b0) { float4x4 M; float2 size; float2 velSize; float useVel; float pad; float dil; float pad2; };\n"
 "Texture2D<float> depthTex : register(t0);\n"
 "Texture2D<float2> velTex : register(t1);\n"
 "struct V { float4 pos : SV_Position; float2 uv : TEXCOORD0; };\n"
 "V vs(uint id : SV_VertexID) { V o; float2 t = float2((id << 1) & 2, id & 2); o.uv = t; o.pos = float4(t * float2(2, -2) + float2(-1, 1), 0, 1); return o; }\n"
+"float2 dec(float2 e) { e = (e - 127.0 / 255.0) * 2.0; return e * e * (e > 0 ? float2(1, 1) : float2(-1, -1)); }\n"
 "float2 ps(V i) : SV_Target {\n"
 "  float d = depthTex.Load(int3(i.pos.xy, 0));\n"
 "  float4 p = mul(float4(i.uv, d, 1), M);\n"
 "  float2 mv = p.xy / p.w - i.uv;\n"
 "  if (useVel > 0) {\n"
 "    float2 e = velTex.Load(int3(i.uv * velSize, 0));\n"
-"    if (e.x != 0) { e = (e - 127.0 / 255.0) * 2.0; mv = e * e * (e > 0 ? float2(1, 1) : float2(-1, -1)); }\n"
+"    if (e.x != 0) {\n"
+"      float2 best = dec(e); float bl = dot(best, best);\n"
+"      for (int y = -4; y <= 4; y++) for (int x = -4; x <= 4; x++) {\n"
+"        if (abs(x) > dil || abs(y) > dil) continue;\n"
+"        float2 n = velTex.Load(int3(i.uv * velSize + float2(x, y), 0));\n"
+"        if (n.x != 0) { float2 d = dec(n); float l = dot(d, d); if (l > bl) { bl = l; best = d; } }\n"
+"      }\n"
+"      if (pad > 0) return (best - mv) * size; mv = best; }\n"
+"    else if (pad > 0) return float2(0, 0);\n"
 "  }\n"
 "  return mv * size;\n"
 "}\n";
@@ -1033,7 +1046,17 @@ static struct {
     ID3D11VertexShader *vs; ID3D11PixelShader *ps; ID3D11Buffer *cb; ID3D11RenderTargetView *rtv; ID3D11Texture2D *rtv_of;
     int failed;
 } g_mv;
-typedef struct { float m[16]; float size[2]; float velSize[2]; float useVel; float pad[3]; } MvConst;
+typedef struct { float m[16]; float size[2]; float velSize[2]; float useVel; float pad; float dil; float pad2; } MvConst;
+/* 0.8.2 (BUG-6, hair/beard wobble): alpha-blended materials (hair, beards) write their velocity multiplied by the texture alpha
+ * (CommonMotionBlurPass.cfi: OutputVelocityRT(cur, prev, fAlpha * diffuse alpha)), fine for motion blur, wrong for an upscaler:
+ * every strand reports a different fraction of the head's motion (seen in a dump: beard edge, sideburns, eyebrows at 0-60 % of the
+ * face's vector). VelocityDilate N: each object-velocity pixel takes the longest vector among the object-velocity pixels within
+ * N pixels (the opaque skin / hair core next to it). Measured at 1594x896: radius 2 repairs 93 %, 3 99 %, 4 all of them.
+ * -1 (default) = by render height: 3 up to 900 lines, 4 above. 0 = off. */
+static int g_vdump, g_mvdump;
+static int vdil_radius(UINT rh) { int r = g_vdil; if (r < 0) r = rh > 900 ? 4 : 3; if (r > 4) r = 4; return r; }
+static int g_vstat_want, g_vcand;
+static UINT g_vb[4];   /* vstat box in render pixels (x0 y0 x1 y1), all 0 = whole frame */
 
 static void mv_release(void) { REL(g_mv.vs); REL(g_mv.ps); REL(g_mv.cb); REL(g_mv.rtv); g_mv.rtv_of = NULL; }
 
@@ -1074,7 +1097,8 @@ static void mv_pass(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11ShaderRes
         g_mv.rtv_of = g_dl.mv;
     }
     memcpy(c.m, M, sizeof c.m); c.size[0] = (float)rw; c.size[1] = (float)rh;
-    c.velSize[0] = (float)vw; c.velSize[1] = (float)vh; c.useVel = (vel && vw && vh) ? 1.0f : 0.0f; c.pad[0] = c.pad[1] = c.pad[2] = 0;
+    c.velSize[0] = (float)vw; c.velSize[1] = (float)vh; c.useVel = (vel && vw && vh) ? 1.0f : 0.0f; c.pad = (g_vstat_want > 0 && !g_mvdump) ? 1.0f : 0.0f;   /* vstat: object minus camera vector */
+    c.dil = (float)vdil_radius(rh); c.pad2 = 0;
     ID3D11DeviceContext_UpdateSubresource(ctx, (ID3D11Resource *)g_mv.cb, 0, NULL, &c, 0, 0);
     rt[0] = g_mv.rtv; cb0[0] = g_mv.cb;
     vp.TopLeftX = 0; vp.TopLeftY = 0; vp.Width = (float)rw; vp.Height = (float)rh; vp.MinDepth = 0; vp.MaxDepth = 1;
@@ -1248,6 +1272,109 @@ static void dump_frame(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11Resour
         ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)st, (ID3D11Resource *)g_dl.out); dump_ppm(ctx, st, od.Width, od.Height, L"out", od.Format == 87 || od.Format == 91); REL(st);
     } else LOG(log_s("dump: staging texture for the output failed"));
 }
+/* `vstat N` (0.8.2): for the next N frames read $VelocityObjects back and log the mean decoded object velocity (render pixels,
+ * pixels with x != 0 only) before and after the jitter correction, next to the jitter of this and the previous frame. On a still
+ * character the corrected mean must be ~0. */
+static float half2f(USHORT h)
+{
+    union { UINT u; float f; } v; UINT s = (UINT)(h >> 15) << 31, e = (h >> 10) & 31, m = h & 1023;
+    if (e == 0) { if (!m) v.u = s; else { int k = 0; while (!(m & 1024)) { m <<= 1; k++; } v.u = s | ((UINT)(113 - k) << 23) | ((m & 1023) << 13); } }
+    else if (e == 31) v.u = s | 0x7f800000u | (m << 13);
+    else v.u = s | ((e + 112) << 23) | (m << 13);
+    return v.f;
+}
+static void vstat_frame(ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *vsrv, UINT rw, UINT rh)
+{
+    ID3D11Resource *res = NULL; ID3D11Texture2D *st = NULL; D3D11_TEXTURE2D_DESC d; D3D11_MAPPED_SUBRESOURCE m; UINT x, y, n = 0, big = 0; double sx = 0, sy = 0, ax = 0, ay = 0; HANDLE f = INVALID_HANDLE_VALUE; BYTE *line = NULL; DWORD wr;
+    if (!vsrv) { LOG(log_s("vstat: no velocity view")); return; }
+    ID3D11ShaderResourceView_GetResource(vsrv, &res);
+    if (!res || !tex_desc(res, &d) || d.Format != 34 /* R16G16_FLOAT */) { LOG(log_s("vstat: velocity buffer is not R16G16_FLOAT (VelocityPatch 0?)")); REL(res); return; }
+    if (!probe_tex(dev, d.Width, d.Height, d.Format, 0, D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ, &st)) { LOG(log_s("vstat: staging texture failed")); REL(res); return; }
+    ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)st, res); REL(res);
+    if (FAILED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)st, 0, D3D11_MAP_READ, 0, &m))) { REL(st); return; }
+    if (g_vdump) {   /* `vdump`: KCDDLSS_vel.ppm, R/G = 128 + 64 per pixel of motion x/y, B = 255 where object velocity exists */
+        WCHAR path[MAX_PATH + 48]; char hdr[48], num[12];
+        g_vdump = 0; path[0] = 0; wcat(path, MAX_PATH + 48, g_dir); wcat(path, MAX_PATH + 48, L"\\KCDDLSS_vel.ppm");
+        f = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        line = VirtualAlloc(NULL, d.Width * 3, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (f != INVALID_HANDLE_VALUE && line) { hdr[0] = 'P'; hdr[1] = '6'; hdr[2] = '\n'; hdr[3] = 0; utoa_w(num, d.Width); lstrcatA(hdr, num); lstrcatA(hdr, " "); utoa_w(num, d.Height); lstrcatA(hdr, num); lstrcatA(hdr, "\n255\n"); WriteFile(f, hdr, lstrlenA(hdr), &wr, NULL); LOG(log_s("vdump: writing KCDDLSS_vel.ppm")); }
+    }
+    for (y = 0; y < d.Height; y++) {
+        const USHORT *row = (const USHORT *)((const BYTE *)m.pData + y * m.RowPitch);
+        if (f != INVALID_HANDLE_VALUE && line) {
+            for (x = 0; x < d.Width; x++) {
+                float ex = 0, ey = 0; int r, g;
+                if (row[x * 2]) { ex = (half2f(row[x * 2]) - 127.0f / 255.0f) * 2.0f; ey = (half2f(row[x * 2 + 1]) - 127.0f / 255.0f) * 2.0f; ex = ex * ex * (ex > 0 ? 1.0f : -1.0f) * (float)rw; ey = ey * ey * (ey > 0 ? 1.0f : -1.0f) * (float)rh; }
+                r = 128 + (int)(ex * 64.0f); g = 128 + (int)(ey * 64.0f); if (r < 0) r = 0; if (r > 255) r = 255; if (g < 0) g = 0; if (g > 255) g = 255;
+                line[x * 3] = (BYTE)r; line[x * 3 + 1] = (BYTE)g; line[x * 3 + 2] = row[x * 2] ? 255 : 0;
+            }
+            WriteFile(f, line, d.Width * 3, &wr, NULL);
+        }
+        for (x = 0; x < d.Width; x++) {
+            float ex, ey;
+            if (g_vb[2] && (x < g_vb[0] || x >= g_vb[2] || y < g_vb[1] || y >= g_vb[3])) continue;
+            if (!row[x * 2]) continue;
+            ex = (half2f(row[x * 2]) - 127.0f / 255.0f) * 2.0f; ey = (half2f(row[x * 2 + 1]) - 127.0f / 255.0f) * 2.0f;
+            ex = ex * ex * (ex > 0 ? 1.0f : -1.0f) * (float)rw; ey = ey * ey * (ey > 0 ? 1.0f : -1.0f) * (float)rh;
+            if (ex > 4.0f || ex < -4.0f || ey > 4.0f || ey < -4.0f) { big++; continue; }   /* really moving: not part of the still-object mean */
+            n++; sx += ex; sy += ey; ax += ex < 0 ? -ex : ex; ay += ey < 0 ? -ey : ey;
+        }
+    }
+    ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)st, 0); REL(st);
+    if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+    if (line) VirtualFree(line, 0, MEM_RELEASE);
+    if (n) { sx /= n; sy /= n; ax /= n; ay /= n; }
+    LOG(log_s("vstat: "); log_u(n); log_s(" px (+"); log_u(big); log_s(" over 4 px) of "); log_u(d.Width); log_s("x"); log_u(d.Height);
+        log_s(", mean mpx "); log_i((int)(sx * 1000)); log_s(" "); log_i((int)(sy * 1000)); log_s(" (abs "); log_i((int)(ax * 1000)); log_s(" "); log_i((int)(ay * 1000));
+        log_s("), jitter mpx "); log_i((int)(g_dl.jx * 1000)); log_s(" "); log_i((int)(g_dl.jy * 1000)); log_s(", prev "); log_i((int)(g_dl.pjx * 1000)); log_s(" "); log_i((int)(g_dl.pjy * 1000));
+        log_s(""));
+}
+
+/* second vstat line: the MV pass drew (object vector - camera vector) in pixels for this frame (0 where there is no object velocity) */
+static void vdiff_frame(ID3D11Device *dev, ID3D11DeviceContext *ctx)
+{
+    ID3D11Texture2D *st = NULL; D3D11_TEXTURE2D_DESC d; D3D11_MAPPED_SUBRESOURCE m; UINT x, y, n = 0, big = 0, h1 = 0, h2 = 0; double sx = 0, sy = 0, ax = 0, ay = 0;
+    if (!g_dl.mv || !tex_desc((ID3D11Resource *)g_dl.mv, &d) || d.Format != 34) { LOG(log_s("vdiff: MV texture is not R16G16_FLOAT")); return; }
+    if (!probe_tex(dev, d.Width, d.Height, d.Format, 0, D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ, &st)) return;
+    ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)st, (ID3D11Resource *)g_dl.mv);
+    if (FAILED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)st, 0, D3D11_MAP_READ, 0, &m))) { REL(st); return; }
+    if (g_mvdump) {   /* the vectors DLSS gets this frame: KCDDLSS_mv.ppm, same scale as KCDDLSS_vel.ppm */
+        WCHAR path[MAX_PATH + 48]; char hdr[48], num[12]; HANDLE f; DWORD wr; BYTE *line = VirtualAlloc(NULL, d.Width * 3, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        g_mvdump = 0; path[0] = 0; wcat(path, MAX_PATH + 48, g_dir); wcat(path, MAX_PATH + 48, L"\\KCDDLSS_mv.ppm");
+        f = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (f != INVALID_HANDLE_VALUE && line) {
+            hdr[0] = 'P'; hdr[1] = '6'; hdr[2] = '\n'; hdr[3] = 0; utoa_w(num, d.Width); lstrcatA(hdr, num); lstrcatA(hdr, " "); utoa_w(num, d.Height); lstrcatA(hdr, num); lstrcatA(hdr, "\n255\n"); WriteFile(f, hdr, lstrlenA(hdr), &wr, NULL);
+            for (y = 0; y < d.Height; y++) {
+                const USHORT *row = (const USHORT *)((const BYTE *)m.pData + y * m.RowPitch);
+                for (x = 0; x < d.Width; x++) { int r = 128 + (int)(half2f(row[x * 2]) * 64.0f), g = 128 + (int)(half2f(row[x * 2 + 1]) * 64.0f); if (r < 0) r = 0; if (r > 255) r = 255; if (g < 0) g = 0; if (g > 255) g = 255; line[x * 3] = (BYTE)r; line[x * 3 + 1] = (BYTE)g; line[x * 3 + 2] = 0; }
+                WriteFile(f, line, d.Width * 3, &wr, NULL);
+            }
+            LOG(log_s("vdump: wrote KCDDLSS_mv.ppm, dilation radius "); log_i(vdil_radius(d.Height)));
+        }
+        if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+        if (line) VirtualFree(line, 0, MEM_RELEASE);
+        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)st, 0); REL(st); return;
+    }
+    for (y = 0; y < d.Height; y++) {
+        const USHORT *row = (const USHORT *)((const BYTE *)m.pData + y * m.RowPitch);
+        for (x = 0; x < d.Width; x++) {
+            float ex, ey, a;
+            if (g_vb[2] && (x < g_vb[0] || x >= g_vb[2] || y < g_vb[1] || y >= g_vb[3])) continue;
+            if (!(row[x * 2] & 0x7fff) && !(row[x * 2 + 1] & 0x7fff)) continue;
+            ex = half2f(row[x * 2]); ey = half2f(row[x * 2 + 1]);
+            a = (ex < 0 ? -ex : ex) + (ey < 0 ? -ey : ey);
+            if (a > 0.25f) h1++;
+            if (a > 1.0f) h2++;
+            if (a > 8.0f) { big++; continue; }
+            n++; sx += ex; sy += ey; ax += ex < 0 ? -ex : ex; ay += ey < 0 ? -ey : ey;
+        }
+    }
+    ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)st, 0); REL(st);
+    if (n) { sx /= n; sy /= n; ax /= n; ay /= n; }
+    LOG(log_s("vdiff: object - camera vector on "); log_u(n); log_s(" px (+"); log_u(big); log_s(" over 8 px): mean mpx "); log_i((int)(sx * 1000)); log_s(" "); log_i((int)(sy * 1000));
+        log_s(", mean abs mpx "); log_i((int)(ax * 1000)); log_s(" "); log_i((int)(ay * 1000)); log_s(", px over 0.25: "); log_u(h1); log_s(", over 1: "); log_u(h2));
+}
+
 /* jitter test (2026-11-09, user: "jitter is not creating new detail"): `jtest N` copies the DLSS colour input of the next N
  * frames into staging textures (cheap, no stall between frames), records the jitter the plugin reported to DLSS for each
  * frame plus the renderer's jitter float2 and the m20/m21 of the jittered (R+0x160) and unjittered (post snapshot)
@@ -1670,7 +1797,15 @@ static void dlss_frame(BYTE *self)
             { float vpc[16], vpp[16], M[16]; UINT vw = 0, vh = 0; ID3D11ShaderResourceView *vsrv = g_cfg.objectmv ? velocity_view(&vw, &vh) : NULL;
               if (vsrv && (vw != rw || vh != rh) && g_dl.frames < 2) LOG(log_s("velocity: buffer "); log_u(vw); log_s("x"); log_u(vh); log_s(" differs from the render size: sampled by uv"));
               if (g_dl.frames < 2) LOG(log_s("dlss: object motion vectors "); log_s(vsrv ? "on" : "off (no velocity view)"));
-              if (get_view_proj(self, vpc, vpp)) { build_reprojection(M, vpc, vpp); mv_pass(dev, ctx, dsrv, vsrv, vw, vh, M, rw, rh); }
+              if (g_vstat_want > 0) vstat_frame(dev, ctx, vsrv, rw, rh);
+              if (get_view_proj(self, vpc, vpp)) {
+                  static float vpp2[16], vpl[16];   /* vstat candidates: which matrix pair does the game's object velocity carry? */
+                  if (g_vstat_want > 0 && g_vcand == 1) build_reprojection(M, vpc, vpp2);
+                  else if (g_vstat_want > 0 && g_vcand == 2) build_reprojection(M, vpp, vpp2);
+                  else build_reprojection(M, vpc, vpp);
+                  if (!same((BYTE *)vpl, (BYTE *)vpp, sizeof vpl)) { memcpy(vpp2, vpl, sizeof vpp2); memcpy(vpl, vpp, sizeof vpl); }
+                  mv_pass(dev, ctx, dsrv, vsrv, vw, vh, M, rw, rh); if (g_vstat_want > 0) vdiff_frame(dev, ctx); }
+              if (g_vstat_want > 0) g_vstat_want--;
               REL(vsrv); }
             r = g_ngx.EvaluateFeature(ctx, g_dl.feature, p, NULL);
             if (r == NGX_OK) probe_frame(dev, ctx, csrv, col_res, &cd);
@@ -1699,6 +1834,7 @@ static void dlss_frame(BYTE *self)
             if (!(dsy > 0.01f && dsy < 100.0f)) dsy = 1.0f;
             *(float *)(self + R_JITTER_X) = 2.0f * sx / (float)rw / dsx;
             *(float *)(self + R_JITTER_Y) = 2.0f * sy / (float)rh / dsy;
+            g_dl.pjx = g_dl.jx; g_dl.pjy = g_dl.jy;
             g_dl.jx = sx; g_dl.jy = sy;
         }
     }
@@ -1819,6 +1955,11 @@ static void exec_commands(char *p, const char *src)
         if (streq(name, "jfixx")) { g_jt.fx = parse_num(val); g_jt.fixed = 1; LOG(log_s("exec("); log_s(src); log_s("): fixed jitter x mpx "); log_i((int)(g_jt.fx * 1000))); continue; }
         if (streq(name, "jfixy")) { g_jt.fy = parse_num(val); g_jt.fixed = 1; LOG(log_s("exec("); log_s(src); log_s("): fixed jitter y mpx "); log_i((int)(g_jt.fy * 1000))); continue; }
         if (streq(name, "jfix")) { g_jt.fixed = 0; LOG(log_s("exec("); log_s(src); log_s("): fixed jitter off (Halton)")); continue; }
+        if (name[0] == 'v' && name[1] == 'b' && name[2] >= '0' && name[2] <= '3' && !name[3]) { g_vb[name[2] - '0'] = (UINT)parse_num(val); LOG(log_s("exec("); log_s(src); log_s("): vstat box "); log_u(g_vb[0]); log_s(" "); log_u(g_vb[1]); log_s(" "); log_u(g_vb[2]); log_s(" "); log_u(g_vb[3])); continue; }
+        if (streq(name, "vcand")) { g_vcand = (int)parse_num(val); LOG(log_s("exec("); log_s(src); log_s("): vstat camera pair candidate "); log_i(g_vcand)); continue; }
+        if (streq(name, "vstat")) { int n = (int)parse_num(val); if (n < 1) n = 8; if (n > 64) n = 64; g_vstat_want = n; LOG(log_s("exec("); log_s(src); log_s("): object velocity statistics, "); log_i(n); log_s(" frames")); continue; }
+        if (streq(name, "vdil")) { g_vdil = (int)parse_num(val); g_dl.reset = 1; g_dl.hold = 5; LOG(log_s("exec("); log_s(src); log_s("): object velocity dilation radius "); log_i(g_vdil)); continue; }
+        if (streq(name, "vdump")) { g_vdump = 1; g_mvdump = 1; g_dump_req = 1; if (g_vstat_want < 1) g_vstat_want = 1; LOG(log_s("exec("); log_s(src); log_s("): velocity + colour dump requested")); continue; }
         if (streq(name, "dump")) { g_dump_req = 1; LOG(log_s("exec("); log_s(src); log_s("): dump of the DLSS input and output requested (KCDDLSS_in.ppm / KCDDLSS_out.ppm)")); continue; }
         cv = ((PFN_GetCVar)VT(console, 23))(console, name);
         if (query == 2) {
@@ -2099,7 +2240,11 @@ static void cvars_exec_once(void)
     LOG(log_s("exec(init): renderer AA mode copy "); log_i(*(int *)(g_wh_base + RVA_AA_MODE)); log_s(" (0 = the game's SMAA/TAA is off, DLSS does the AA)"));
     g_startup_done = 1;
     if (g_cfg.exec[0]) exec_commands(g_cfg.exec, "ini");
-    if (g_cfg.mode != -1) mode_apply(g_cfg.mode, "ini");
+    if (g_cfg.mode == -1) {   /* 0.8.2 (BUG-7): Auto left the game's resolution alone, so with the game at the output resolution no frame was ever upscaled and the log only said "waiting" */
+        LOGC(log_s("config: Mode = Auto is no longer a startup setting: using Quality (pick another in Graphics > Advanced; the ini is updated then)"));
+        g_cfg.mode = 2;
+    }
+    mode_apply(g_cfg.mode, "ini");
     g_flip_time = GetTickCount();
 }
 static void watchdog(void)
@@ -2135,8 +2280,11 @@ static void watchdog_fast(void)
         if (g_cfg.prereq && fs != 1) kind = 1;                                                  /* r_FullscreenNativeRes put back */
         else if (g_true_nw && ow && (ow != g_true_nw || oh != g_true_nh)) kind = 2;              /* output size followed r_Width */
         else return;
+    } else if (g_true_nw && ow >= w && oh >= h && ow == g_true_nw && oh == g_true_nh) {
+        kind = 4;                                                                                 /* 0.8.2: a "1280x720 > 1080p" entry: the output (r_NativeWidth) is unchanged */
     } else if (g_true_nw && (w != g_true_nw || h != g_true_nh) && w >= 640 && h >= 480 && w <= 16384 && h <= 16384) {
         kind = 3; g_true_nw = w; g_true_nh = h;                                                   /* a real resolution change */
+        if (ow >= w && oh >= h && ow <= 16384 && oh <= 16384) { g_true_nw = ow; g_true_nh = oh; }   /* 0.8.2: the entry carries its own output size */
     } else kind = 4;                                                                             /* r_Width = output size again */
     if ((int)(now - win_t0) > 10000) { win_t0 = now; win_n = 0; }
     if (++win_n > 20) { hold_until = now + 10000; LOG(log_s("watchdog: 20 fixes in 10 s, something fights back: pausing for 10 s")); return; }
@@ -2156,6 +2304,42 @@ static void watchdog_fast(void)
     }
     if (kind >= 3) mode_apply(g_cfg.mode, "watchdog");
 }
+/* 0.8.2 debug build: resolution probe. One "res:" line whenever any of these changes (checked at most every 100 ms from the frame
+ * tick, and forced around the profile Load/Save hooks): r_Width x r_Height, r_NativeWidth x r_NativeHeight, r_Fullscreen,
+ * r_FullscreenNativeRes, the renderer's native-size fields, the game window's client size and the display mode. t = ms since the first call. */
+#ifdef KCDDLSS_DEBUG
+static BOOL CALLBACK res_wnd_cb(HWND h, LPARAM lp) { DWORD pid = 0; GetWindowThreadProcessId(h, &pid); if (pid == GetCurrentProcessId() && IsWindowVisible(h) && !GetWindow(h, GW_OWNER)) { *(HWND *)lp = h; return FALSE; } return TRUE; }
+static void res_probe(const char *tag, int force)
+{
+    static int last[12], have; static DWORD t0, tl; int v[12], i, ch = 0; DWORD now = GetTickCount(); void *c; HWND w = NULL; RECT rc; DEVMODEW dm;
+    if (!t0) t0 = now;
+    if (!force && (int)(now - tl) < 100) return;
+    tl = now;
+    for (i = 0; i < 12; i++) v[i] = -1;
+    if (console_ptr()) {
+        if ((c = cvar_find("r_Width"))) v[0] = cvar_int(c);
+        if ((c = cvar_find("r_Height"))) v[1] = cvar_int(c);
+        if ((c = cvar_find("r_NativeWidth"))) v[2] = cvar_int(c);
+        if ((c = cvar_find("r_NativeHeight"))) v[3] = cvar_int(c);
+        if ((c = cvar_find("r_Fullscreen"))) v[4] = cvar_int(c);
+        if ((c = cvar_find("r_FullscreenNativeRes"))) v[5] = cvar_int(c);
+    }
+    if (g_wh_base) { BYTE *r = g_wh_base + RVA_RENDERER; v[6] = (int)*(UINT *)(r + R_NATIVE_W); v[7] = (int)*(UINT *)(r + R_NATIVE_H); }
+    EnumWindows(res_wnd_cb, (LPARAM)&w);
+    if (w && GetClientRect(w, &rc)) { v[8] = (int)(rc.right - rc.left); v[9] = (int)(rc.bottom - rc.top); }
+    memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
+    if (EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dm)) { v[10] = (int)dm.dmPelsWidth; v[11] = (int)dm.dmPelsHeight; }
+    for (i = 0; i < 12; i++) if (v[i] != last[i]) ch = 1;
+    if (!force && have && !ch) return;
+    for (i = 0; i < 12; i++) last[i] = v[i];
+    have = 1;
+    LOG(log_s("res: t "); log_u(now - t0); log_s(" ms ["); log_s(tag); log_s("] r_Width "); log_i(v[0]); log_s("x"); log_i(v[1]); log_s(", r_Native "); log_i(v[2]); log_s("x"); log_i(v[3]);
+        log_s(", fullscreen "); log_i(v[4]); log_s(", native-res "); log_i(v[5]); log_s(", renderer native "); log_i(v[6]); log_s("x"); log_i(v[7]);
+        log_s(", window "); log_i(v[8]); log_s("x"); log_i(v[9]); log_s(", display mode "); log_i(v[10]); log_s("x"); log_i(v[11]));
+}
+#else
+#define res_probe(tag, force) ((void)0)
+#endif
 /* live console: Bin\Win64\KCDDLSS.cmd is polled every 30 frames; its lines are executed and the file deleted */
 static void cmdfile_poll(void)
 {
@@ -2179,6 +2363,7 @@ static void frame_tick(void)
     if ((++calls & 63) != 0) return;
     now = GetTickCount();
     if (!t0) { t0 = now; return; }
+    res_probe("tick", 0);
     if (g_wh_base) watchdog_fast();
     if ((int)(now - last) < 500) return;
     last = now;
@@ -2579,6 +2764,71 @@ static void menu_xml_install(BYTE *base)
     LOG(log_s("menu: ISystem::LoadXmlFromFile hooked (CSystem vtable slot 112): the DLSS rows are added to " MENU_XML_NAME " in memory when the UI loads"));
 }
 
+/* --- 0.8.2 (Nexus, DarkwinDuck): the saved resolution ---
+ * The game's settings object saves r_Width/r_Height into the profile (attributes.xml res_x/res_y), and those hold OUR render size while
+ * DLSS upscales. At the next start its Load snaps that size to the nearest display mode (960x540 -> 800x600), sets r_Width to it and
+ * the Resolution row shows it, until the startup settings repair it seconds later. Two vtable slots of that object are hooked:
+ * Save writes the output size over the render size after the game's own Save, Load repairs a profile an older version saved
+ * (fullscreen: the output is the desktop size). The game's setters are used, no file is touched. RE: scratch res/ notes, CHANGES.md 119. */
+#define RVA_SET_VT_LOAD   0x22ecf80u   /* settings object vtable: Load(this+0x10, IPlayerProfile *) */
+#define RVA_SET_VT_SAVE   0x22ecf88u   /*                         Save(this+0x10, IPlayerProfile *) */
+#define RVA_FN_SET_LOAD   0x1150d40u
+#define RVA_FN_SET_SAVE   0x11559c0u
+#define RVA_FN_ATTR_SETI  0x113ef10u   /* bool SetAttributeInt(IPlayerProfile *, const char *name, const int *value) */
+#define RVA_FN_ATTR_GETI  0x113be84u   /* bool GetAttributeInt(IPlayerProfile *, const char *name, int *value): value untouched when missing */
+typedef void *(*PFN_SetIO)(void *self, void *profile, void *r8, void *r9);
+typedef char (*PFN_AttrI)(void *profile, const char *name, int *value);
+static PFN_SetIO g_orig_setload, g_orig_setsave;
+static void *my_SetSave(void *self, void *profile, void *r8, void *r9)
+{
+    void *ret = g_orig_setsave(self, profile, r8, r9); static int logged;
+    res_probe("profile save", 1);
+    if (profile && g_wh_base && g_startup_done && g_cfg.mode >= 0 && g_cfg.mode <= 4 && g_mode_rw && g_mode_rh) {
+        void *cw = cvar_find("r_Width"), *ch = cvar_find("r_Height"); int ow, oh, zero = 0;
+        if (g_true_nw >= 640 && g_true_nh >= 480) { ow = (int)g_true_nw; oh = (int)g_true_nh; } else { ow = (int)g_mode_nw; oh = (int)g_mode_nh; }
+        if (cw && ch && (UINT)cvar_int(cw) == g_mode_rw && (UINT)cvar_int(ch) == g_mode_rh && ow >= 640 && oh >= 480 && ((UINT)ow != g_mode_rw || (UINT)oh != g_mode_rh)) {
+            PFN_AttrI seti = (PFN_AttrI)(void *)(g_wh_base + RVA_FN_ATTR_SETI);
+            seti(profile, "res_x", &ow); seti(profile, "res_y", &oh); seti(profile, "nat_res_x", &zero); seti(profile, "nat_res_y", &zero);
+            if (logged < 4) { logged++; LOG(log_s("profile: the game saved our render size "); log_u(g_mode_rw); log_s("x"); log_u(g_mode_rh); log_s(" as its resolution: replaced with the output size "); log_i(ow); log_s("x"); log_i(oh)); }
+        }
+    }
+    return ret;
+}
+static void *my_SetLoad(void *self, void *profile, void *r8, void *r9)
+{
+    static int logged;
+    if (profile && g_wh_base && g_cfg.prereq && g_cfg.mode >= -1 && g_cfg.mode <= 4) {
+        PFN_AttrI geti = (PFN_AttrI)(void *)(g_wh_base + RVA_FN_ATTR_GETI), seti = (PFN_AttrI)(void *)(g_wh_base + RVA_FN_ATTR_SETI);
+        int w = 0, h = 0, fs = -1, zero = 0; DEVMODEW dm;
+        geti(profile, "res_x", &w); geti(profile, "res_y", &h); geti(profile, "res_fs", &fs);
+        memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
+        if (logged < 4) { LOG(log_s("profile: load: saved resolution "); log_i(w); log_s("x"); log_i(h); log_s(", fullscreen "); log_i(fs)); }
+        /* fullscreen (res_fs 1) with r_FullscreenNativeRes (our prerequisite) and borderless (res_fs 2): the output is always the desktop mode, so a smaller saved size is an old render size */
+        if ((fs == 1 || fs == 2) && w > 0 && h > 0 && EnumDisplaySettingsW(NULL, ENUM_REGISTRY_SETTINGS, &dm) && dm.dmPelsWidth >= 640 && dm.dmPelsHeight >= 480
+            && ((UINT)w < dm.dmPelsWidth || (UINT)h < dm.dmPelsHeight)) {
+            int dw = (int)dm.dmPelsWidth, dh = (int)dm.dmPelsHeight;
+            seti(profile, "res_x", &dw); seti(profile, "res_y", &dh); seti(profile, "nat_res_x", &zero); seti(profile, "nat_res_y", &zero);
+            if (logged < 4) LOG(log_s("profile: load: that is a render size an older version left: using the desktop size "); log_i(dw); log_s("x"); log_i(dh));
+        }
+        if (logged < 4) logged++;
+    }
+    res_probe("profile load: before", 1);
+    { void *ret = g_orig_setload(self, profile, r8, r9); res_probe("profile load: after", 1); return ret; }
+}
+static void profile_res_install(BYTE *base)
+{
+    BYTE **sl = (BYTE **)(base + RVA_SET_VT_LOAD), **ss = (BYTE **)(base + RVA_SET_VT_SAVE); DWORD old, tmp;
+    if (!g_cfg.saveres) { LOG(log_s("profile: SaveOutputRes 0 in KCDDLSS.ini: the game saves the render size as its resolution")); return; }
+    if (!readable((BYTE *)sl, 16)) { LOG(log_s("profile: settings vtable unreadable: the saved resolution is left to the game")); return; }
+    if (*sl == (BYTE *)my_SetLoad) return;
+    if (*sl != base + RVA_FN_SET_LOAD || *ss != base + RVA_FN_SET_SAVE) { LOG(log_s("profile: settings Load/Save slots are "); log_x((ULONG_PTR)*sl); log_s(" / "); log_x((ULONG_PTR)*ss); log_s(": unsupported game version, the saved resolution is left to the game")); return; }
+    if (!VirtualProtect(sl, 16, PAGE_READWRITE, &old)) { LOG(log_s("profile: cannot write the settings vtable: the saved resolution is left to the game")); return; }
+    g_orig_setload = (PFN_SetIO)(void *)*sl; g_orig_setsave = (PFN_SetIO)(void *)*ss;
+    *sl = (BYTE *)my_SetLoad; *ss = (BYTE *)my_SetSave;
+    VirtualProtect(sl, 16, old, &tmp);
+    LOG(log_s("profile: settings Load/Save hooked: the game's saved resolution stays the output size, not the DLSS render size"));
+}
+
 /* --- 0.8.0: the renderer's own swap-chain repair, tried as a replacement for the minimize/restore kick (FINDINGS_KCD_NATIVERES_SWITCH.md) ---
  * The game's focus handler DeviceInfo::OnActivate(DI, wParam, lParam) queues event 13; the next RT_BeginFrame then calls the
  * renderer's activate routine (swap chain reset + OnD3D11PostCreateDevice = what alt-tab repairs with). With the window-thread
@@ -2621,6 +2871,7 @@ static void hook_whgame(BYTE *base)
     sharpen_patch(base);
     dlss_install(base);
     menu_xml_install(base);
+    profile_res_install(base);
     dir = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
     if (!dir->VirtualAddress) { LOGC(log_s("no import table: DLSS hook not installed")); return; }
     real_gpa = GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetProcAddress");

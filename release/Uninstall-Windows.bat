@@ -47,6 +47,11 @@ if "%CUR%"=="%DLSS_SIZE%" (del /q "%B%\nvngx_dlss.dll" "%B%\NVIDIA-DLSS-LICENSE.
 if exist "%GAME%\Mods\KCDDLSS" rmdir /s /q "%GAME%\Mods\KCDDLSS" && echo Menu: Mods\KCDDLSS removed.
 if exist "%GAME%\Mods\mod_order.txt" (findstr /v /i /x "KCDDLSS" "%GAME%\Mods\mod_order.txt" > "%GAME%\Mods\mod_order.kcddlss-tmp" & move /y "%GAME%\Mods\mod_order.kcddlss-tmp" "%GAME%\Mods\mod_order.txt" >nul)
 if exist "%B%\KCDGrassFix.asi.off" if not exist "%B%\KCDGrassFix.asi" ren "%B%\KCDGrassFix.asi.off" "KCDGrassFix.asi" && echo Grass: standalone 30 FPS Grass Fix restored (KCDGrassFix.asi).
+set "CUR2="
+if exist "%B%\dinput8.dll" call :size "%B%\dinput8.dll" CUR2
+set "OTHER2="
+if exist "%B%\*.asi" set "OTHER2=1"
+if "%CUR2%"=="%UAL_SIZE%" if not defined OTHER2 del /q "%B%\dinput8.dll" 2>nul & echo Loader: Bin\Win64\dinput8.dll removed.
 if not exist "%B%\version.dll" (echo Loader: no version.dll there.& goto :done)
 call :size "%B%\version.dll" CUR
 if not "%CUR%"=="%UAL_SIZE%" (echo Loader: Bin\Win64\version.dll is not the file this mod installs. Left alone.& goto :done)

@@ -1,5 +1,18 @@
 # Changelog
 
+## BETA 5 (2026-11-12)
+
+Plugin build 0.8.2.
+
+- Fix: hair and beards wobbled on characters that barely move. Alpha-blended materials write only a part of their motion into the game's velocity buffer (velocity times alpha), so strands reported 0-60 % of the head's motion. Each object-velocity pixel now takes the longest object vector within a few pixels (`VelocityDilate` in `KCDDLSS.ini`: -1 automatic, 0 off, 1-4 fixed radius).
+- Fix: the game started at a low resolution for some seconds (for example 800x600) and the Resolution row in Graphics Settings showed that value. The game saved the DLSS render size as its resolution and snapped it to the nearest display mode at the next start. The plugin hooks the settings object's profile Save and Load: the saved value stays the output size, and a profile saved by an older version is repaired at load in fullscreen and borderless (`SaveOutputRes` in `KCDDLSS.ini`, 0 = off).
+- Fix: `Mode = Auto` in an ini kept from BETA 3 never started DLSS. It now falls back to Quality and the log says so.
+- Fix attempt for "no KCDDLSS.log at all, files correct": when another program has loaded the Windows `version.dll` before the game loads its own DLLs, the loader copy named `version.dll` is skipped. `Install-Windows.bat` now also installs the loader as `dinput8.dll` (a foreign `dinput8.dll` is left alone); the uninstaller removes it. Reproduced on the PC with `tools/windows/test/prever.c` (starts the game with the Windows `version.dll` preloaded): no log with `version.dll` only, plugin loads with the `dinput8.dll` copy.
+- A "1280x720 > 1080p" entry of the Resolution row is no longer taken as a new output size.
+- `Report-Windows.bat`: new sections for the running game (loaded modules, whether `KCDDLSS.asi` is loaded) and Windows security (Smart App Control, antivirus, Code Integrity blocks).
+- Debug build: `res:` lines (one per change of the game's resolution settings, window size and display mode), console commands `vstat`, `vdump`, `vdil`.
+- Verified on the PC (RTX 4070, 1920x1080: fullscreen and borderless, old and new profiles, menu Confirm) and on Bazzite (RX 9070 XT, 3840x2160, FSR 4 through OptiScaler: display mode stays 3840x2160 from the first frame; 2560x1440 for 7 s with the fix off). Not tested: plain windowed mode. The hair fix is proven on velocity-buffer dumps, not by eye.
+
 ## BETA 4 (2026-11-10)
 
 Plugin build 0.8.1.
