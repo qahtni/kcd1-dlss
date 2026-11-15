@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Fix (OptiScaler download): the game hung at its logo window ("not responding", `KCDDLSS.log` ends after `D3D11CreateDevice`) on Windows when another game in the same Steam library ships an `nvngx_dlss.dll`. Cause in OptiScaler 0.9.4: `Util::FindFilePath`'s Unreal fallback takes `Bin\Win64` for a UE layout and scans all of `steamapps\common`; finding another game's `nvngx_dlss.dll` arms the `nvngx` override in `hk_K32_CreateFileW` (GPU spoofing on, the default on AMD / Intel), whose function-local `static signedDll` runs the same scan, which calls `CreateFileW` again and waits on its own static initialisation (`Kernel_Hooks.cpp:221`). The first `CreateFileW` after OptiScaler loads is the plugin's log write. The shipped `OptiScaler.ini` now has `Dxgi=false` and `StreamlineSpoofing=false` (the mod loads OptiScaler by name and does not need the spoofing); the installers switch both from `auto` to `false` in an `OptiScaler.ini` kept from an earlier install. `OPTISCALER.txt` (standard download) gives the same two lines for a manual setup; `Report-Windows.bat` shows them.
+- `README.txt`: plain Windowed mode does not upscale (the game resizes the window to the render size instead of stretching); use Fullscreen or Borderless.
+- Verified on Windows 11 with an RX 9070 XT (Baldur's Gate 3 in the same library): hang reproduced with the BETA-5 `OptiScaler.ini` (thread stacks: main thread in `hk_K32_CreateFileW` waiting on its own static init), game starts and upscales (`CreateFeature ... result 0x1`, borderless 2560x1440) with the two lines set. The changed installers and `build_release.sh` were not run end to end.
+
 ## BETA 5 (2026-11-12)
 
 Plugin build 0.8.2.

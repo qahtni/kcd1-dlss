@@ -14,7 +14,8 @@
 @OPTI@#      install/version.dll (Ultimate ASI Loader) and OptiScaler (install/OptiScaler: OptiScaler.dll
 @OPTI@#      and its FSR / XeSS files; OptiScaler.ini kept if present) to Bin/Win64, next to
 @OPTI@#      KingdomCome.exe, and sets NgxDll = OptiScaler.dll in KCDDLSS.ini. A different version.dll or
-@OPTI@#      OptiScaler.dll already there is left alone.
+@OPTI@#      OptiScaler.dll already there is left alone. In a kept OptiScaler.ini, Dxgi=auto and
+@OPTI@#      StreamlineSpoofing=auto become false (GPU spoofing off); values you set yourself stay.
 #      A standalone KCDGrassFix.asi (30 FPS Grass Fix) is renamed to .off: this mod contains it.
 #   3. Steam/Proton: adds the line "version"="native,builtin" to the game's Proton prefix
 #      (DLL overrides in user.reg, backup kept), so Proton loads version.dll from the game folder.
@@ -147,6 +148,13 @@ else cp -f "$SELF/install/KCDDLSS.ini" "$B/KCDDLSS.ini" || die "Could not copy K
 @OPTI@  mkdir -p "$B/D3D12_Optiscaler" && cp -f "$SELF/install/OptiScaler/D3D12_Optiscaler/D3D12Core.dll" "$B/D3D12_Optiscaler/D3D12Core.dll" ||
 @OPTI@    { rm -f "$B/D3D12_Optiscaler/D3D12Core.dll"; die "Could not copy D3D12_Optiscaler/D3D12Core.dll to $B (disk full?). The half-copied file was removed."; }
 @OPTI@  [ -e "$B/OptiScaler.ini" ] || cp -f "$SELF/install/OptiScaler/OptiScaler.ini" "$B/OptiScaler.ini" || die "Could not copy OptiScaler.ini to $B."
+@OPTI@  # A kept OptiScaler.ini (BETA 3-5): GPU spoofing auto -> false (OptiScaler 0.9.4 can hang at start with it, see OPTISCALER.txt). CRLF kept.
+@OPTI@  if [ -e "$B/OptiScaler.ini" ]; then
+@OPTI@    sed -i -e 's/^Dxgi=auto\(\r\?\)$/Dxgi=false\1/' -e 's/^StreamlineSpoofing=auto\(\r\?\)$/StreamlineSpoofing=false\1/' "$B/OptiScaler.ini" 2>/dev/null
+@OPTI@    if grep -qE '^(Dxgi|StreamlineSpoofing)=auto' "$B/OptiScaler.ini"; then
+@OPTI@      echo "OptiScaler: could not edit OptiScaler.ini. Set Dxgi=false and StreamlineSpoofing=false in Bin/Win64/OptiScaler.ini yourself."
+@OPTI@    else echo "OptiScaler: GPU spoofing off in OptiScaler.ini (Dxgi / StreamlineSpoofing; a value you set yourself is kept)."; fi
+@OPTI@  fi
 @OPTI@  mkdir -p "$B/OptiScaler-Licenses" && cp -f "$SELF/install/OptiScaler/Licenses/"* "$B/OptiScaler-Licenses/" 2>/dev/null
 @OPTI@  echo "OptiScaler: Bin/Win64/OptiScaler.dll and its FSR / XeSS files copied (OptiScaler @OPTI_VERSION@)."
 @OPTI@fi

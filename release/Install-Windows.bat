@@ -14,6 +14,8 @@ rem   1. Checks the game is closed.
 @OPTI@rem      have one), install\version.dll (Ultimate ASI Loader) and OptiScaler (install\OptiScaler:
 @OPTI@rem      OptiScaler.dll and its FSR / XeSS files; OptiScaler.ini kept if you already have one) to
 @OPTI@rem      Bin\Win64, next to KingdomCome.exe, and sets NgxDll = OptiScaler.dll in KCDDLSS.ini.
+@OPTI@rem      In a kept OptiScaler.ini, Dxgi=auto and StreamlineSpoofing=auto become false (GPU spoofing
+@OPTI@rem      off: with it, OptiScaler can hang at start); values you set yourself stay.
 @OPTI@rem      A different version.dll or OptiScaler.dll that is already there is left alone.
 rem   3. Renames a standalone KCDGrassFix.asi (30 FPS Grass Fix) to KCDGrassFix.asi.off: this mod
 rem      contains the same fix. The uninstaller renames it back.
@@ -69,6 +71,11 @@ if exist "%B%\KCDDLSS.ini" (
 @OPTI@if not exist "%B%\D3D12_Optiscaler" mkdir "%B%\D3D12_Optiscaler"
 @OPTI@copy /y /b "%SELF%\install\OptiScaler\D3D12_Optiscaler\D3D12Core.dll" "%B%\D3D12_Optiscaler\D3D12Core.dll" >nul || goto :copyfail
 @OPTI@if not exist "%B%\OptiScaler.ini" copy /y "%SELF%\install\OptiScaler\OptiScaler.ini" "%B%\OptiScaler.ini" >nul
+@OPTI@rem A kept OptiScaler.ini (BETA 3-5): GPU spoofing auto -> false. With spoofing on, OptiScaler 0.9.4 hangs at start when
+@OPTI@rem another game in the Steam library has an nvngx_dlss.dll (see OPTISCALER.txt). Only "auto" is changed, CRLF kept.
+@OPTI@set "OINI=%B%\OptiScaler.ini"
+@OPTI@if exist "%OINI%" powershell -NoProfile -ExecutionPolicy Bypass -Command "$f=$env:OINI; $t=[IO.File]::ReadAllText($f); $u=$t -replace '(?m)^Dxgi=auto(?=\r?$)','Dxgi=false' -replace '(?m)^StreamlineSpoofing=auto(?=\r?$)','StreamlineSpoofing=false'; if ($u -ne $t) { [IO.File]::WriteAllText($f, $u) }" >nul 2>&1
+@OPTI@if exist "%OINI%" (findstr /b /c:"Dxgi=auto" /c:"StreamlineSpoofing=auto" "%OINI%" >nul && echo OptiScaler: could not edit OptiScaler.ini. Set Dxgi=false and StreamlineSpoofing=false in Bin\Win64\OptiScaler.ini yourself. || echo OptiScaler: GPU spoofing off in OptiScaler.ini ^(Dxgi / StreamlineSpoofing; a value you set yourself is kept^).)
 @OPTI@if not exist "%B%\OptiScaler-Licenses" mkdir "%B%\OptiScaler-Licenses"
 @OPTI@copy /y "%SELF%\install\OptiScaler\Licenses\*.*" "%B%\OptiScaler-Licenses" >nul 2>nul
 @OPTI@echo OptiScaler: Bin\Win64\OptiScaler.dll and its FSR / XeSS files copied ^(OptiScaler @OPTI_VERSION@^).

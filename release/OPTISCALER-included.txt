@@ -22,6 +22,9 @@ WHAT THE INSTALLER DOES FOR OPTISCALER
 - Sets the line NgxDll = OptiScaler.dll in Bin\Win64\KCDDLSS.ini: the mod
   loads OptiScaler by that name. Do NOT rename OptiScaler.dll to dxgi.dll,
   winmm.dll or nvngx.dll as the OptiScaler wiki suggests for other games.
+- Sets Dxgi=false and StreamlineSpoofing=false in OptiScaler.ini (also in
+  one kept from an earlier install, where they are still "auto"; a value
+  you set yourself stays). See GPU SPOOFING IS OFF below.
 - A different OptiScaler.dll that is already in Bin\Win64 is left alone and
   the mod uses it.
 The same on Windows and on Steam Deck / Linux. On Linux no OptiScaler Proton
@@ -67,6 +70,21 @@ folder (Microsoft's DirectX 12 Agility SDK) that the installer put in
 Bin\Win64. Windows 11 does not need it; it stays unused unless that line
 is set.
 
+GPU SPOOFING IS OFF
+OptiScaler normally tells a game on an AMD or Intel card that it runs on an
+NVIDIA card (Dxgi=auto). This mod does not need that: it loads OptiScaler by
+name and talks to it directly. With the spoofing on, OptiScaler 0.9.4 hangs
+at the game's logo window ("not responding", the log ends after
+"D3D11CreateDevice") when another game in the same Steam library has an
+nvngx_dlss.dll (seen on Windows 11, RX 9070 XT, with Baldur's Gate 3
+installed): OptiScaler takes Bin\Win64 for an Unreal Engine folder,
+searches all of steamapps\common for that file, finds the other game's
+copy and then waits on itself in its CreateFileW hook. So this download
+ships
+  [Spoofing] Dxgi=false
+  [Spoofing] StreamlineSpoofing=false
+Set them back to auto only if you know you need the spoofing.
+
 CHECK THAT IT WORKS
 Bin\Win64\KCDDLSS.log says
   NGX provider from KCDDLSS.ini NgxDll: ...\Bin\Win64\OptiScaler.dll
@@ -88,8 +106,9 @@ generation for OptiScaler to replace.
 LICENCES AND SOURCE CODE
 - OptiScaler @OPTI_VERSION@: free software under the GNU General Public License
   version 3 (install\OptiScaler\Licenses\OptiScaler-LICENSE.txt). The files
-  come from the official release, unmodified except one line in
-  OptiScaler.ini (Dx11Upscaler=auto changed to Dx11Upscaler=fsr31_12):
+  come from the official release, unmodified except three lines in
+  OptiScaler.ini (Dx11Upscaler=auto changed to Dx11Upscaler=fsr31_12,
+  Dxgi=auto and StreamlineSpoofing=auto changed to false):
   Optiscaler_0.9.4-final.20260718._MM.7z
   (https://github.com/optiscaler/OptiScaler/releases/tag/v0.9.4).
   Source code of exactly this version:
@@ -109,7 +128,7 @@ LICENCES AND SOURCE CODE
 - The mod itself (KCDDLSS.asi) is public domain, source code at
   https://github.com/qahtni/kcd1-dlss
 OptiScaler, FSR and XeSS are their authors' work; this download only
-passes them on (OptiScaler.ini with the one line above), with credit to the OptiScaler team. It is not an
+passes them on (OptiScaler.ini with the three lines above), with credit to the OptiScaler team. It is not an
 official OptiScaler release. The only official OptiScaler places are its
 GitHub, its Discord and Nitec's Nexus Mods page.
 

@@ -199,10 +199,14 @@ KNOWN BEHAVIOUR
   resolution list and the quality presets work as before.
 - The mod talks to one game: KingdomCome.exe, Steam 1.9.8, 64-bit DX11.
   Other versions get a one-line note in the log and no changes.
+- Use Fullscreen or Borderless (Options > Video). In plain Windowed mode
+  the game resizes the window to the render size instead of stretching
+  the picture, so the upscaling never runs: KCDDLSS.log stays at "waiting
+  for the first upscaled frame" and the window takes the render size.
 
 FSR / XeSS THROUGH OPTISCALER (AMD, INTEL)
 @STD@Not included in this archive. OPTISCALER.txt has the download link and the
-@STD@steps for Windows (copy OptiScaler's files, one ini line) and for Linux
+@STD@steps for Windows (copy OptiScaler's files, a few ini lines) and for Linux
 @STD@(a Proton build with OptiScaler, nothing to copy).
 @OPTI@Included and set up by the installers. In the game press Insert for
 @OPTI@OptiScaler's overlay (upscaler, FSR 4, sharpening). OPTISCALER.txt has

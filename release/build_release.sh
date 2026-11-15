@@ -10,7 +10,7 @@
 # .bat/.ini/README get CRLF; .sh stay LF and executable.
 # OptiScaler download: OPTISCALER=<folder of the extracted Optiscaler_0.9.4-final.20260718._MM.7z> (env) builds
 #   dist/KCDDLSS-<version>-OptiScaler.7z instead (top folder KCDDLSS-OptiScaler): no nvngx_dlss.dll; install/OptiScaler/ =
-#   OptiScaler.dll, OptiScaler.ini (Dx11Upscaler=fsr31_12, the only change), the FSR / XeSS DLLs, D3D12_Optiscaler/D3D12Core.dll, Licenses (the release's
+#   OptiScaler.dll, OptiScaler.ini (Dx11Upscaler=fsr31_12, Dxgi=false, StreamlineSpoofing=false), the FSR / XeSS DLLs, D3D12_Optiscaler/D3D12Core.dll, Licenses (the release's
 #   AMD / Intel texts + OptiScaler's GPL-3.0 text, OPTISCALER_LICENSE env, default downloads/optiscaler-license/LICENSE).
 #   Template lines starting @OPTI@ are used instead of lines starting @STD@; OPTISCALER-included.txt ships as OPTISCALER.txt.
 set -euo pipefail
@@ -57,8 +57,18 @@ else
   python3 -I - "$OPTI/OptiScaler.ini" "$O/OptiScaler.ini" <<'PY'
 import sys
 s = open(sys.argv[1], 'rb').read()
-old = b'\nDx11Upscaler=auto'; assert s.count(old) == 1, 'Dx11Upscaler=auto not found once'
-open(sys.argv[2], 'wb').write(s.replace(old, b'\nDx11Upscaler=fsr31_12', 1))   # FSR 3.1 via DX12: upgrades to FSR 4 on RDNA 3/4
+for old, new in (
+    (b'\nDx11Upscaler=auto', b'\nDx11Upscaler=fsr31_12'),   # FSR 3.1 via DX12: upgrades to FSR 4 on RDNA 3/4
+    # GPU spoofing off: the mod loads OptiScaler by name and talks NGX to it, the game never needs to see an NVIDIA card.
+    # With it on, OptiScaler 0.9.4 can hang at start: Util::FindFilePath's Unreal fallback takes Bin\Win64 for a UE layout and
+    # scans all of steamapps\common; another game's nvngx_dlss.dll there arms hk_K32_CreateFileW, whose function-local static
+    # runs the same scan, which calls CreateFileW again and waits on its own static init (Kernel_Hooks.cpp:221).
+    (b'\nDxgi=auto', b'\nDxgi=false'),
+    (b'\nStreamlineSpoofing=auto', b'\nStreamlineSpoofing=false'),
+):
+    assert s.count(old) == 1, old.decode().strip() + ' not found once'
+    s = s.replace(old, new, 1)
+open(sys.argv[2], 'wb').write(s)
 PY
   for f in FidelityFX_v1_LICENSE.md FidelityFX_v2_LICENSE.md XeSS_LICENSE.txt DirectX_LICENSE.txt; do cp -p "$OPTI/Licenses/$f" "$O/Licenses/$f"; done
   sed 's/\r$//; s/$/\r/' "$OPTI_LIC" > "$O/Licenses/OptiScaler-LICENSE.txt"

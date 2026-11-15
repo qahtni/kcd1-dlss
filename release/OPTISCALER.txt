@@ -40,6 +40,12 @@ WINDOWS
      NgxDll =
    to
      NgxDll = OptiScaler.dll
+   and in Bin\Win64\OptiScaler.ini (section [Spoofing]) change
+     Dxgi=auto                to  Dxgi=false
+     StreamlineSpoofing=auto  to  StreamlineSpoofing=false
+   The mod does not need the GPU spoofing, and with it OptiScaler 0.9.4
+   can hang at the game's logo window when another game in the Steam
+   library has an nvngx_dlss.dll (it searches all of steamapps\common).
 4. Start the game. Bin\Win64\KCDDLSS.log now says
      NGX provider from KCDDLSS.ini NgxDll: ...\Bin\Win64\OptiScaler.dll
    and a bit later "dlss: CreateFeature ... result 0x1". Press Insert in

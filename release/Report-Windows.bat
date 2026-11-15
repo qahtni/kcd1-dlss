@@ -52,7 +52,7 @@ echo --- graphics cards
 powershell -NoProfile -Command "Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name + ', driver ' + $_.DriverVersion }" 2>nul
 echo.
 echo --- OptiScaler.ini
-if exist "%B%\OptiScaler.ini" findstr /b /i "Dx11Upscaler= OverlayMenu= ShortcutKey= Fsr4Update= LoadAsiPlugins=" "%B%\OptiScaler.ini"
+if exist "%B%\OptiScaler.ini" findstr /b /i "Dx11Upscaler= OverlayMenu= ShortcutKey= Fsr4Update= LoadAsiPlugins= Dxgi= StreamlineSpoofing=" "%B%\OptiScaler.ini"
 if not exist "%B%\OptiScaler.ini" echo not there
 echo.
 echo --- KCDDLSS.log
