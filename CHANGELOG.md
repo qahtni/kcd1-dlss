@@ -1,5 +1,19 @@
 # Changelog
 
+## BETA 6 (2026-11-16)
+
+Plugin build 0.8.2 (same number, small iteration).
+
+- Fix: jagged, blocky outline around the character in the inventory. After the upscale the game fills the screen-size depth buffer from the render-size one without filtering, and the inventory UI is depth-tested against it. The plugin rewrites that depth at screen size for the UI. `InventoryFix = 0` turns it off.
+- Global illumination option reworked (`GIFullRes`, on by default; console `r_DLSSGI 0/1`). The SVOGI buffer is now a third of the render size on every graphics preset (`e_svoTI_LowSpecMode 3`, `e_svoTI_ResScaleBase 0`; the game's own size is 1/3 on Ultra down to 1/8 on Low, which shows as blocky shading at DLSS render sizes), with `e_svoTI_ConeMaxLength 16` and `e_svoTI_DiffuseConeWidth 32`. `0` puts the game's own values back, also live.
+- Steam Deck: at its first start on a Deck the mod writes `GIFullRes = 0` into `KCDDLSS.ini`, once (mark: `SteamDeckDefaults = 1`), and never changes it again. The Deck is recognised by its hardware name (Valve Jupiter / Galileo), not by the `SteamDeck` variable, so a PC running SteamOS or Bazzite keeps the option on.
+- GOG and Epic builds (experimental, untested: no such copy here). The 28 game addresses the plugin needs are no longer fixed Steam offsets; they are found at start by code signatures, each with several independent witnesses that must agree. On a mismatch the affected feature stays off and the log says which address. If you run a non-Steam copy, please post your `KCDDLSS.log`.
+- `KCDDLSS.ini` is down to six settings (Mode, Preset, Sharpness, MipBiasOffset, GIFullRes, InventoryFix). The others still work when present, so an ini kept from an older version behaves as before; they are listed under "ADVANCED SETTINGS" in the README. The fix for the blue flash in water (`Exec = fxwrap WaterRipples`) is now built in instead of being an ini line.
+- Fix: the plugin read only the first 4 KB of `KCDDLSS.ini` (no released ini was that long).
+- `Report-Windows.bat` output is shorter.
+- New offline test (`tools/asi/test.sh`, no game needed): build, address signatures against a stock DLL, parsers and ini handling, every shader through the compiler, and the shipped binaries installing themselves into a mapped `WHGame.dll`.
+- Verified on the PC (RTX 4070, 1920x1080, Steam: inventory, GI values set and restored, water fix without the ini line) and on Bazzite (RX 9070 XT, FSR 4 through OptiScaler; the build before the ini change). Not verified on a real Steam Deck (the first-start rule is covered by the offline test only).
+
 ## BETA 5 (2026-11-12)
 
 Plugin build 0.8.2.

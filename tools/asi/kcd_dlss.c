@@ -16,6 +16,7 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include "sig.h"
+#include "addr_sig.h"   /* run-time address table (gen_addr.py, ADDR_CONTRACT.md) */
 
 #ifdef KCDDLSS_DEBUG
 #define DBG 1
@@ -64,7 +65,7 @@ static WCHAR g_dir[MAX_PATH + 8];          /* folder of the plugin (Bin\Win64), 
 /* KCDDLSS.ini next to the plugin: Key = Value per line. Defaults below. */
 /* mode: -1 Auto (the game's resolution decides), else the NGX PerfQuality value (0 Performance, 1 Balanced, 2 Quality, 3 UltraPerformance, 4 UltraQuality [0.7.4: 0.83 render scale, factor table only], 5 Native/DLAA);
  * preset: 0 Transformer, 1 CNN, 2 Default, 3 one letter (preset_val) for every mode; mipoff: added to log2(render/native) (NVIDIA/AMD -1.0, Intel 0) */
-static struct { int mipbias, objectmv, probe, quality, jitter, velpatch, dlss, mode, preset, preset_val, blackms, prereq, gifull, menurows, saveres; float sharpness, mipoff; char exec[512]; WCHAR ngxdll[64]; } g_cfg = { 1, 1, 1, -1, 1, 1, 1, -1, 0, 0, 0, 1, 1, 1, 1, 0.0f, -1.0f, "", L"" };   /* BlackMs 0 since 0.7.1: the menu fades by itself (user 2026-11-08) */
+static struct { int mipbias, objectmv, probe, quality, jitter, velpatch, dlss, mode, preset, preset_val, blackms, prereq, gifull, menurows, saveres, invfix; float sharpness, mipoff; char exec[512]; WCHAR ngxdll[64]; int deckdone; } g_cfg = { 1, 1, 1, -1, 1, 1, 1, -1, 0, 0, 0, 1, 1, 1, 1, 1, 0.0f, -1.0f, "fxwrap WaterRipples", L"", 0 };   /* Exec default = the blue-flash fix (was an ini line up to BETA 5) */   /* BlackMs 0 since 0.7.1: the menu fades by itself (user 2026-11-08) */
 static int g_log_open;
 static int g_vdil = -1;   /* 0.8.2: VelocityDilate (-1 auto by render height, 0 off, 1..4 pixels), see the MV pass */
 static int g_log_temp;   /* 0.8.1: the log went to %TEMP% because the plugin folder is not writable */
@@ -145,6 +146,34 @@ static int ci_eq(const char *a, const char *b)   /* case-insensitive key compare
     for (; *a && *b; a++, b++) { char c = *a; if (c >= 'A' && c <= 'Z') c += 32; if (c != *b) return 0; }
     return *a == 0 && *b == 0;
 }
+
+/* Steam Deck = the machine itself (SMBIOS: manufacturer Valve, product Jupiter = LCD or Galileo = OLED), read from the registry
+ * copy Windows keeps; Wine / Proton fill the same key from /sys/class/dmi/id. Not the SteamDeck=1 environment variable: Steam
+ * sets that for every game it starts in its -steamdeck mode, so also on a desktop PC running Bazzite or SteamOS (logged only). */
+static int g_deck;
+static void deck_detect(void)
+{
+    static const char K[] = "HARDWARE\\DESCRIPTION\\System\\BIOS";
+    char mf[48], pn[48], ev[8]; DWORD sz;
+    sz = sizeof mf; if (RegGetValueA(HKEY_LOCAL_MACHINE, K, "SystemManufacturer", RRF_RT_REG_SZ, NULL, mf, &sz) != ERROR_SUCCESS) mf[0] = 0;
+    sz = sizeof pn; if (RegGetValueA(HKEY_LOCAL_MACHINE, K, "SystemProductName", RRF_RT_REG_SZ, NULL, pn, &sz) != ERROR_SUCCESS) pn[0] = 0;
+    mf[sizeof mf - 1] = 0; pn[sizeof pn - 1] = 0;
+    if (!GetEnvironmentVariableA("SteamDeck", ev, sizeof ev)) ev[0] = 0;
+    g_deck = ci_eq(mf, "valve") && (ci_eq(pn, "jupiter") || ci_eq(pn, "galileo"));
+    LOG(log_s("env: machine \""); log_s(mf); log_s("\" \""); log_s(pn); log_s("\", Steam Deck hardware "); log_s(g_deck ? "yes" : "no");
+        log_s(", SteamDeck variable \""); log_s(ev); log_s("\""));
+}
+static void ini_save_key(const char *key, const char *lkey, const char *name);
+/* First start on a Steam Deck: GIFullRes = 0 is written into the ini once, with SteamDeckDefaults = 1 as the mark that it was
+ * done. After that the ini is the player's: the plugin never changes GIFullRes again (user's rule, 2026-11-16). */
+static void deck_first_run(void)
+{
+    deck_detect();
+    if (!g_deck || g_cfg.deckdone) return;
+    g_cfg.gifull = 0; g_cfg.deckdone = 1;
+    LOG(log_s("gi: first start on a Steam Deck: GIFullRes set to 0 in KCDDLSS.ini, once (set it to 1 there to turn the GI option on)"));
+    ini_save_key("GIFullRes", "gifullres", "0"); ini_save_key("SteamDeckDefaults", "steamdeckdefaults", "1");
+}
 static float parse_num(const char *v)
 {
     float r = 0, f = 0.1f; int neg = 0;
@@ -180,10 +209,10 @@ static int preset_parse(const char *s, int *val)
 }
 static void cfg_load(void)
 {
-    WCHAR path[MAX_PATH + 40]; HANDLE h; char buf[4096]; DWORD n = 0; char *line, *end, *eq, *v, *k; int i;
+    WCHAR path[MAX_PATH + 40]; HANDLE h; static char buf[8192]; DWORD n = 0; char *line, *end, *eq, *v, *k; int i;   /* the shipped ini is about 4.6 KB */
     path[0] = 0; wcat(path, MAX_PATH + 40, g_dir); wcat(path, MAX_PATH + 40, L"\\KCDDLSS.ini");
     h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) { LOG(log_s("config: no KCDDLSS.ini, defaults (MipBias 1, ObjectMV 1, Probe 1, Quality auto, Sharpness 0)")); return; }
+    if (h == INVALID_HANDLE_VALUE) { LOG(log_s("config: no KCDDLSS.ini, defaults (MipBias 1, ObjectMV 1, Probe 1, Quality auto, Sharpness 0)")); deck_first_run(); return; }
     if (!ReadFile(h, buf, sizeof buf - 1, &n, NULL)) n = 0;
     CloseHandle(h);
     buf[n] = 0;
@@ -212,13 +241,16 @@ static void cfg_load(void)
         else if (ci_eq(k, "blackms")) g_cfg.blackms = (int)parse_num(v);
         else if (ci_eq(k, "prereq")) g_cfg.prereq = (int)parse_num(v);
         else if (ci_eq(k, "gifullres")) g_cfg.gifull = (int)parse_num(v);
+        else if (ci_eq(k, "steamdeckdefaults")) g_cfg.deckdone = (int)parse_num(v);
+        else if (ci_eq(k, "inventoryfix")) g_cfg.invfix = (int)parse_num(v);
         else if (ci_eq(k, "ngxdll")) { const char *w = cfg_word(v); int j = 0; while (w[j] && j < 63) { g_cfg.ngxdll[j] = (WCHAR)(unsigned char)w[j]; j++; } g_cfg.ngxdll[j] = 0; }
         else if (ci_eq(k, "exec")) { int j = 0; while (*v == ' ' || *v == '\t') v++; while (v[j] && v[j] != '\r' && j < (int)sizeof g_cfg.exec - 1) { g_cfg.exec[j] = v[j]; j++; } g_cfg.exec[j] = 0; }
     }
     if (!DBG) g_cfg.probe = 0;   /* the probe exists in the debug build only */
+    deck_first_run();
     LOG(log_s("config: KCDDLSS.ini MipBias "); log_i(g_cfg.mipbias); log_s(", ObjectMV "); log_i(g_cfg.objectmv); log_s(", Probe "); log_i(g_cfg.probe);
         log_s(", Quality "); log_i(g_cfg.quality); log_s(" (-1 auto), Sharpness "); log_i((int)(g_cfg.sharpness * 100)); log_s("%, Jitter "); log_i(g_cfg.jitter); log_s(", VelocityPatch "); log_i(g_cfg.velpatch); log_s(", DLSS "); log_i(g_cfg.dlss); log_s(", MenuRows "); log_i(g_cfg.menurows);
-        log_s(", Mode "); log_i(g_cfg.mode); log_s(" (-1 auto), Preset "); log_i(g_cfg.preset); log_s("/"); log_i(g_cfg.preset_val); log_s(", MipBiasOffset "); log_i((int)(g_cfg.mipoff * 1000)); log_s(" milli, Prereq "); log_i(g_cfg.prereq); log_s(", GIFullRes "); log_i(g_cfg.gifull); log_s(", NgxDll \""); log_w(g_cfg.ngxdll); log_s("\", Exec \""); log_s(g_cfg.exec); log_s("\""));
+        log_s(", Mode "); log_i(g_cfg.mode); log_s(" (-1 auto), Preset "); log_i(g_cfg.preset); log_s("/"); log_i(g_cfg.preset_val); log_s(", MipBiasOffset "); log_i((int)(g_cfg.mipoff * 1000)); log_s(" milli, Prereq "); log_i(g_cfg.prereq); log_s(", GIFullRes "); log_i(g_cfg.gifull); log_s(", InventoryFix "); log_i(g_cfg.invfix); log_s(", NgxDll \""); log_w(g_cfg.ngxdll); log_s("\", Exec \""); log_s(g_cfg.exec); log_s("\""));
 }
 
 /* ---- NGX ABI (plain C view of nvsdk_ngx.h / nvsdk_ngx_params.h) ---- */
@@ -436,6 +468,7 @@ static void ngx_init(ID3D11Device *dev)
  * piece of code after the simulation that shifts each grass point along its speed by the time still
  * missing to the next step, so the drawn pose moves every frame. Found by bytes, not by address. */
 static int same(const BYTE *a, const BYTE *b, SIZE_T n) { while (n--) if (*a++ != *b++) return 0; return 1; }
+static int same_m(const BYTE *a, const BYTE *b, const BYTE *m, SIZE_T n) { while (n--) { if (*m++ && *a != *b) return 0; a++, b++; } return 1; }   /* m[i] 0 = any byte */
 static int readable(const BYTE *p, SIZE_T n)
 {
     MEMORY_BASIC_INFORMATION mbi; const BYTE *end = p + n;
@@ -720,28 +753,80 @@ static FARPROC WINAPI my_GetProcAddress(HMODULE h, LPCSTR name)
  * convention: -x, +y) goes to DLSS as Jitter.Offset.
  * Requirements (user.cfg): r_Width/r_Height = render size, r_NativeWidth/r_NativeHeight = output size (or
  * fullscreen native res), r_AntialiasingMode 0. Anything unexpected: log once, leave the game's stretch result. */
-#define RVA_RENDERER    0x34c6980u   /* CD3D9Renderer instance (static object) */
-#define RVA_VT_UPSCALE  0x23e9b68u   /* renderer vtable entry +0xab8 */
-#define RVA_FN_UPSCALE  0x29b51cu    /* expected value of that entry */
-#define RVA_DEPTH_SRV   0x34efab0u   /* ID3D11ShaderResourceView* of the hardware depth buffer (bound at t16) */
-#define RVA_VELOCITY_TEX 0x378f6d8u  /* CTexture* $VelocityObjects[2] (slot 1 = right eye); FINDINGS_KCD_CTEXTURE.md */
-#define RVA_STEREO_EYE  0x2ff12b4u   /* int: current eye index (0 mono) */
+/* A_RENDERER: CD3D9Renderer instance (static object) */
+/* A_VT_UPSCALE: renderer vtable entry +0xab8 */
+/* A_FN_UPSCALE: expected value of that entry */
+/* A_DEPTH_SRV: ID3D11ShaderResourceView* of the hardware depth buffer (bound at t16) */
+/* A_VELOCITY_TEX: CTexture* $VelocityObjects[2] (slot 1 = right eye); FINDINGS_KCD_CTEXTURE.md */
+/* A_STEREO_EYE: int: current eye index (0 mono) */
 #define ETF_R16G16F 0x0e            /* CryEngine eTF for R16G16_FLOAT (patched in for $VelocityObjects) */
 #define CT_DEVTEX 0x30u              /* CTexture+0x30 CDeviceTexture* -> +0 ID3D11Resource* */
 #define CT_WIDTH 0x48u               /* u16 width, +0x4a u16 height, +0x4e u8 eTF (0x0b = R8G8S) */
 #define CT_SRV 0xc0u                 /* default ID3D11ShaderResourceView* */
-#define RVA_JITTER_ZERO 0x3e243fu    /* and qword ptr [r15+0xf20], 0 (8 bytes) in the jitter generator */
-#define RVA_AA_MODE     0x358fcc4u   /* effective r_AntialiasingMode copy */
-#define RVA_PLOG        0x29d1798u   /* ILog* (gEnv->pLog); slot 2 = LogV(type, fmt, va_list), type 3 = eAlways -> game console + kcd.log (FINDINGS_KCD_LOG.md) */
+/* A_JITTER_ZERO: and qword ptr [r15+0xf20], 0 (8 bytes) in the jitter generator */
+/* A_AA_MODE: effective r_AntialiasingMode copy */
+/* A_PLOG: ILog* (gEnv->pLog); slot 2 = LogV(type, fmt, va_list), type 3 = eAlways -> game console + kcd.log (FINDINGS_KCD_LOG.md) */
 typedef void (*PFN_LogV)(void *log, int type, const char *fmt, char *va);
+/* ---- run-time addresses (ADDR_CONTRACT.md) ----
+ * Every WHGame.dll address the plugin uses is looked up once, as soon as the dll is known (hook_whgame), by code signatures and
+ * MSVC RTTI: table addr_sig.h (generated by gen_addr.py), resolver addr_resolve.h (shared with the offline test addr_test.c).
+ * WH(A_X) = the address, NULL when unresolved: the feature that needs it is skipped with one log line naming the missing ids. */
+static BYTE *g_addr[A_COUNT], *g_addr_base;
+#define WH(id) (g_addr[id])
+#define ADDR_READABLE(p, n) readable((const BYTE *)(p), (SIZE_T)(n))
+#include "addr_resolve.h"
+static int addr_all(const unsigned char *ids, int n) { while (n-- > 0) if (!g_addr[ids[n]]) return 0; return 1; }
+static void log_missing(const unsigned char *ids, int n) { int i, k = 0; for (i = 0; i < n; i++) if (!g_addr[ids[i]]) { log_s(k++ ? ", " : ""); log_s(addr_name[ids[i]]); } }
+static void addr_init(BYTE *base)
+{
+    static struct addr_res er[ADDR_TAB_N]; BYTE *res[A_COUNT]; LARGE_INTEGER fq, t0, t1; IMAGE_NT_HEADERS64 *nt;
+    DWORD stamp, img, ms; unsigned i, j, ok = 0; int steam;
+    if (!base || base == g_addr_base) return;
+    nt = (IMAGE_NT_HEADERS64 *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew);
+    stamp = nt->FileHeader.TimeDateStamp; img = nt->OptionalHeader.SizeOfImage;
+    QueryPerformanceFrequency(&fq); QueryPerformanceCounter(&t0);
+    addr_run(base, addr_tab, ADDR_TAB_N, er, res, A_COUNT);
+    QueryPerformanceCounter(&t1);
+    ms = fq.QuadPart ? (DWORD)((t1.QuadPart - t0.QuadPart) * 1000 / fq.QuadPart) : 0;
+    steam = ADDR_STEAM_STAMP && ADDR_STEAM_IMAGE && stamp == ADDR_STEAM_STAMP && img == ADDR_STEAM_IMAGE;
+    for (i = 0; i < A_COUNT; i++) {
+        if (steam && res[i] && (DWORD)(res[i] - base) != addr_steam_rva[i]) {
+            LOGC(log_s("addr: SELF-CHECK FAILED for "); log_s(addr_name[i]); log_s(": found WHGame.dll+"); log_x((ULONG_PTR)(res[i] - base)); log_s(", the Steam build has +"); log_x(addr_steam_rva[i]); log_s(": treated as unresolved"));
+            res[i] = NULL;
+        }
+        if (res[i]) ok++;
+    }
+    LOG(log_s("addr: "); log_u(ok); log_s("/"); log_u(A_COUNT); log_s(" resolved in "); log_u(ms); log_s(" ms ("); log_u((DWORD)ADDR_TAB_N); log_s(steam ? " witnesses, Steam build: self-check on)" : " witnesses, not the proven Steam build)"));
+    for (i = 0; i < A_COUNT; i++) {
+        int all = 1; DWORD nw = 0, nv = 0;
+        for (j = 0; j < ADDR_TAB_N; j++) if (addr_tab[j].id == i) { nw++; if (er[j].target) nv++; if (er[j].target != res[i]) all = 0; }
+        if (res[i] && all) continue;
+        EnterCriticalSection(&g_log_cs);
+        log_s("addr: "); log_s(addr_name[i]); if (res[i]) { log_s(" +"); log_x((ULONG_PTR)(res[i] - base)); } else log_s(" UNRESOLVED");
+        if (res[i] && nw >= 2 && nv < 2) { res[i] = NULL; log_s(" REJECTED (one vote only)"); }   /* several witnesses, one hit: not trusted */ log_s(", votes "); log_u(nv); log_s("/"); log_u(nw); log_s(":");
+        for (j = 0, nw = 0; j < ADDR_TAB_N; j++) if (addr_tab[j].id == i) {
+            log_s(nw++ ? ", " : " "); log_u(er[j].hits); log_s(er[j].hits == 1 ? " hit" : " hits"); if (er[j].target) { log_s(" +"); log_x((ULONG_PTR)(er[j].target - base)); }
+        }
+        log_end(); LeaveCriticalSection(&g_log_cs);
+    }
+    if (!steam && ok) {   /* another store build: the found RVAs, for the forum report */
+        EnterCriticalSection(&g_log_cs); log_s("addr: rva");
+        for (i = 0; i < A_COUNT; i++) if (res[i]) { if (g_len > 500) { log_end(); log_s("addr: rva"); } log_s(" "); log_s(addr_name[i]); log_s("="); log_x((ULONG_PTR)(res[i] - base)); }
+        log_end(); LeaveCriticalSection(&g_log_cs);
+    }
+    for (i = 0; i < A_COUNT; i++) g_addr[i] = res[i];
+    g_addr_base = base;
+    if (!g_addr[A_CONSOLE]) LOG(log_s("cvars: unsupported game version, startup settings, prerequisites and the DLSS mode/preset cvars skipped (unresolved: CONSOLE)"));
+    if (!g_addr[A_PLOG]) LOG(log_s("log: unsupported game version, plugin lines are not copied to the game console (unresolved: PLOG)"));
+}
 static BYTE *g_wh_base;   /* tentative definition; the real one with its comment follows below */
 /* 0.7.2: every plugin log line also goes into the game's drop-down console and kcd.log, prefixed [KCDDLSS] (user: "same way the FPS fix
  * does it"). Lines written before WHGame.dll is known stay in KCDDLSS.log only. "%s" + a hand-made va_list: no formatting of our text. */
 static void game_log(const char *line, int len)
 {
     static char buf[1040]; void *log, **vt; unsigned long long args[1]; int i = 0, j; const char *pre = "[KCDDLSS] ";
-    if (!g_wh_base || len <= 0 || !readable(g_wh_base + RVA_PLOG, 8)) return;
-    log = *(void **)(g_wh_base + RVA_PLOG);
+    if (!g_wh_base || !WH(A_PLOG) || len <= 0 || !readable(WH(A_PLOG), 8)) return;
+    log = *(void **)WH(A_PLOG);
     if (!log || !readable((BYTE *)log, 8)) return;
     vt = *(void ***)log;
     if (!vt || !readable((BYTE *)vt, 8 * 3) || !vt[2]) return;
@@ -751,7 +836,7 @@ static void game_log(const char *line, int len)
     args[0] = (unsigned long long)(ULONG_PTR)buf;
     ((PFN_LogV)vt[2])(log, 3, "%s", (char *)args);
 }
-#define RVA_CONSOLE     0x29d1768u   /* IConsole* (gEnv->pConsole copy); GetCVar = vtable slot 23, ICVar::GetIVal = slot 2 */
+/* A_CONSOLE: IConsole* (gEnv->pConsole copy); GetCVar = vtable slot 23, ICVar::GetIVal = slot 2 */
 #define R_DOWNSCALE_X 0x6764
 #define R_DOWNSCALE_Y 0x6768
 #define R_JITTER_X 0xf20
@@ -895,8 +980,8 @@ static DXGI_FORMAT uav_format(DXGI_FORMAT f)   /* UAVs cannot be sRGB or typeles
 
 static ID3D11ShaderResourceView *depth_view(void)   /* the game's hardware-depth SRV global; validated before use */
 {
-    ID3D11ShaderResourceView **pp = (ID3D11ShaderResourceView **)(g_wh_base + RVA_DEPTH_SRV), *v, *q = NULL;
-    if (!readable((BYTE *)pp, 8)) return NULL;
+    ID3D11ShaderResourceView **pp = (ID3D11ShaderResourceView **)WH(A_DEPTH_SRV), *v, *q = NULL;
+    if (!pp || !readable((BYTE *)pp, 8)) return NULL;
     v = *pp;
     if (!v || !readable((BYTE *)v, 8) || !readable(*(BYTE **)v, 8 * 4)) return NULL;
     if (FAILED(ID3D11ShaderResourceView_QueryInterface(v, &IID_SRV_local, (void **)&q))) return NULL;
@@ -907,9 +992,10 @@ static ID3D11ShaderResourceView *depth_view(void)   /* the game's hardware-depth
  * x == 0 means "no object velocity", else prevUV - uv encoded sign*sqrt, *0.5 + 127/255 (Common.cfi EncodeMotionVector)) */
 static ID3D11ShaderResourceView *velocity_view(UINT *vw, UINT *vh)
 {
-    BYTE **slot = (BYTE **)(g_wh_base + RVA_VELOCITY_TEX), *t, *devtex; ID3D11ShaderResourceView *v, *q = NULL; int eye;
+    BYTE **slot = (BYTE **)WH(A_VELOCITY_TEX), *t, *devtex; ID3D11ShaderResourceView *v, *q = NULL; int eye;
     static int logged, warned;
-    if (readable(g_wh_base + RVA_STEREO_EYE, 4)) { eye = *(int *)(g_wh_base + RVA_STEREO_EYE); if (eye == 1) slot++; }
+    if (!slot) return NULL;
+    if (WH(A_STEREO_EYE) && readable(WH(A_STEREO_EYE), 4)) { eye = *(int *)WH(A_STEREO_EYE); if (eye == 1) slot++; }   /* unresolved: mono */
     if (!readable((BYTE *)slot, 8)) return NULL;
     t = *slot;
     if (!t || !readable(t, 0xd0)) return NULL;
@@ -1385,7 +1471,7 @@ static float g_jt_sx = -1.0f, g_jt_sy = 1.0f;   /* test: factors on the jitter r
 static struct { int want, n, fixed; float fx, fy; ID3D11Texture2D *st[JT_MAX]; float jx[JT_MAX], jy[JT_MAX], rx[JT_MAX], ry[JT_MAX], p20[JT_MAX], p21[JT_MAX], u20[JT_MAX], u21[JT_MAX]; int bgra; } g_jt;
 static void jt_frame(ID3D11Device *dev, ID3D11DeviceContext *ctx, BYTE *self, ID3D11Resource *col_res, const D3D11_TEXTURE2D_DESC *cd)
 {
-    int k = g_jt.n, i; const float *U = (const float *)(g_wh_base + 0x34b95f8u);
+    int k = g_jt.n, i; const float *U = (const float *)WH(A_POST_PROJ);
     g_jt.bgra = (cd->Format == 87 || cd->Format == 88 || cd->Format == 90 || cd->Format == 91);
     if (k < g_jt.want && k < JT_MAX) {
         if (!probe_tex(dev, cd->Width, cd->Height, cd->Format, 0, D3D11_USAGE_STAGING, D3D11_CPU_ACCESS_READ, &g_jt.st[k])) { LOG(log_s("jtest: staging texture failed")); g_jt.want = k; }
@@ -1519,8 +1605,6 @@ static void build_reprojection(float *M, const float *viewProjCur, const float *
  * row-major 4x4, row-vector convention). Its own "previous view" slot (renderer+0xaa0) is already overwritten with this
  * frame's view by the time the upscale runs, so we keep our own previous view AND previous projection (the game
  * ignores FOV changes; we do not). Returns 0 (zero motion, DLSS reset) on the first frame or after a camera cut. */
-#define RVA_POST_VIEW 0x34b95b8u
-#define RVA_POST_PROJ 0x34b95f8u
 static float g_prev_view[16], g_prev_proj[16], g_prev_cam[3]; static int g_have_prev;
 static void cam_pos(const float *V, float *c)
 {
@@ -1529,10 +1613,10 @@ static void cam_pos(const float *V, float *c)
 }
 static int get_view_proj(BYTE *self, float *viewProjCur, float *viewProjPrev)
 {
-    const float *V = (const float *)(g_wh_base + RVA_POST_VIEW), *P = (const float *)(g_wh_base + RVA_POST_PROJ);
+    const float *V = (const float *)WH(A_POST_VIEW), *P = (const float *)WH(A_POST_PROJ);
     float dx, dy, dz, jump, cur[3]; int ok = 0;
     (void)self;
-    if (!readable((const BYTE *)V, 128)) return 0;
+    if (!V || !P || !readable((const BYTE *)V, 64) || !readable((const BYTE *)P, 64)) return 0;
     if (P[0] == 0 || P[5] == 0 || P[14] == 0) { if (g_dl.frames < 2) LOG(log_s("mv: projection snapshot not a perspective matrix (p00/p11/p32 zero): zero vectors")); return 0; }
     cam_pos(V, cur);
     if (g_dl.frames < 2) LOG(log_s("mv: proj p00 "); log_i((int)(P[0] * 1000)); log_s(" p11 "); log_i((int)(P[5] * 1000)); log_s(" p22 "); log_i((int)(P[10] * 1000)); log_s(" p23 "); log_i((int)(P[11] * 1000));
@@ -1561,6 +1645,7 @@ static void mode_apply(int mode, const char *src);
 static void dlssmode_sync(int mode);
 static void dlsspreset_sync(void);
 static void *cvar_find(const char *name);
+static void gi_set(int on, const char *src);
 static int g_startup_done;
 static UINT g_mode_rw, g_mode_rh;   /* render size the current mode asked for (watchdog) */
 static UINT g_mode_nw, g_mode_nh;   /* output size that render size was computed from */
@@ -1571,11 +1656,10 @@ static UINT g_true_nw, g_true_nh;   /* 0.7.1: the real output size = the native-
 /* Stale-binding check (FINDINGS_KCD_COLORGRADING.md): CTexture::Apply skips the D3D bind when its per-slot record at
  * WHGame+0x33ff908 + slot*0x40 (+0x28 SRV) already matches. Compare the record with the live PS SRVs at hook time; a
  * frame where they differ (record non-null, live different) gets a bit per slot. Masks kept for the last 16 frames. */
-#define RVA_BINDREC 0x33ff908u
 static void bind_check(ID3D11DeviceContext *ctx)
 {
-    ID3D11ShaderResourceView *live[16]; unsigned int m = 0, i; BYTE *rec = g_wh_base + RVA_BINDREC;
-    if (!readable(rec, 16 * 0x40)) { g_bmask[g_bmask_n++ & 15] = 0x80000000u; return; }
+    ID3D11ShaderResourceView *live[16]; unsigned int m = 0, i; BYTE *rec = WH(A_BINDREC);
+    if (!rec || !readable(rec, 16 * 0x40)) { g_bmask[g_bmask_n++ & 15] = 0x80000000u; return; }
     ID3D11DeviceContext_PSGetShaderResources(ctx, 0, 16, live);
     for (i = 0; i < 16; i++) {
         void *r = *(void **)(rec + i * 0x40 + 0x28);
@@ -1594,8 +1678,6 @@ static void bind_check(ID3D11DeviceContext *ctx)
  * after CREPostProcess::mfDraw) and the last 16 states are printed on probe spikes. "fxoff Name" swaps the effect's
  * vptr to a private copy whose Preprocess always returns false; "fxon Name" restores it. */
 #define PFX_MGR_OFF 0xef68
-#define RVA_GAMEFX 0x3786b84u
-#define RVA_CUSTOMVIS 0x3786b88u
 #define FX_VT_SLOTS 24
 typedef const char *(*PFN_FxName)(void *fx);
 typedef float (*PFN_ParamF)(void *p);
@@ -1655,14 +1737,14 @@ static int fx_scan(void)
     g_fx_state = 1;
     DLOG(log_s("postfx: "); log_i(n); log_s(" effects:"); for (i = 0; i < n; i++) { log_s(" "); log_i(g_fx[i].id); log_s(":"); log_s(g_fx[i].name); });
     DLOG(log_s("postfx: gated effects found:"); for (k = 0; k < 8; k++) { log_s(" "); log_s(g_gated[k].name); log_s(g_fx_gated[k] ? "=ok" : "=MISSING"); }
-        log_s("; r_PostProcessGameFx="); log_i(readable(g_wh_base + RVA_GAMEFX, 4) ? *(int *)(g_wh_base + RVA_GAMEFX) : -1));
+        log_s("; r_PostProcessGameFx="); log_i(WH(A_GAMEFX) && readable(WH(A_GAMEFX), 4) ? *(int *)WH(A_GAMEFX) : -1));
     return 1;
 }
 static void fx_sample(void)
 {
     unsigned int h = g_fxh_n & 15; int k;
     if (!fx_scan()) return;
-    g_fxh[h].gamefx = readable(g_wh_base + RVA_GAMEFX, 4) ? *(int *)(g_wh_base + RVA_GAMEFX) : -1;
+    g_fxh[h].gamefx = WH(A_GAMEFX) && readable(WH(A_GAMEFX), 4) ? *(int *)WH(A_GAMEFX) : -1;
     for (k = 0; k < 8; k++) {
         float a = fx_param(g_fx_gated[k], g_gated[k].off);
         if (k == 7) { float a2 = fx_param(g_fx_gated[k], 0x48), a3 = fx_param(g_fx_gated[k], 0x50); if (a2 > a) a = a2; if (a3 > a) a = a3; }
@@ -1729,6 +1811,98 @@ static void fx_set(const char *name, int mode, const char *src)
         LOG(log_s("exec("); log_s(src); log_s("): post effect "); log_s(name); log_s(" ON (vtable restored), wrapped Render calls so far "); log_u(g_fx_wrap_calls));
     }
 }
+/* ---- Output-size depth mask (BUG-9, inventory character outline; 2026-11-15) ----
+ * After the stretch the game fills the output-size depth-stencil from the render-size depth, point-sampled (colour writes off,
+ * depth func ALWAYS, depth write on, no stencil), and Scaleform then draws the UI depth-tested against it: with a render size
+ * below the output size the UI cuts the 3D character out in render-size blocks. Fix: right after the game's fill (seen as the
+ * next OMSetDepthStencilState call, the Draw vtable entries cannot be hooked) write that depth again from the same render-size
+ * depth, with a bilinear coverage of "something was drawn here" cut at 0.5 and the frame's jitter removed, so the outline
+ * steps at output pixels. Assumes background depth 0 or 1. KCDDLSS.ini `InventoryFix = 0` or the live command `invfix 0` = off. */
+static int g_df_state;   /* 1 = DLSS frame done, waiting for the game's depth fill; 2 = its state is set, the fill draw comes next */
+static const char DM_HLSL[] =
+"Texture2D<float> dep : register(t0);\n"
+"cbuffer c : register(b0) { float4 k; };\n"   /* k.xy render size, k.zw jitter in render pixels */
+"struct V { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
+"V vs(uint id : SV_VertexID) { V o; float2 t = float2((id << 1) & 2, id & 2); o.uv = t; o.p = float4(t * float2(2, -2) + float2(-1, 1), 0, 1); return o; }\n"
+"float f(V v) {\n"
+"  float2 s = v.uv * k.xy - 0.5 - k.zw; float2 f = frac(s); int2 i = int2(floor(s)); int2 m = int2(k.xy) - 1;\n"
+"  float4 d = float4(dep.Load(int3(clamp(i, 0, m), 0)), dep.Load(int3(clamp(i + int2(1, 0), 0, m), 0)), dep.Load(int3(clamp(i + int2(0, 1), 0, m), 0)), dep.Load(int3(clamp(i + int2(1, 1), 0, m), 0)));\n"
+"  float4 w = float4((1 - f.x) * (1 - f.y), f.x * (1 - f.y), (1 - f.x) * f.y, f.x * f.y);\n"
+"  float od = 0, bd = 0, ow = -1, bw = -1, cov = 0;\n"
+"  for (int j = 0; j < 4; j++) {\n"
+"    bool bg = d[j] <= 0.0 || d[j] >= 1.0;\n"
+"    if (bg) { if (w[j] > bw) { bw = w[j]; bd = d[j]; } }\n"
+"    else { cov += w[j]; if (w[j] > ow) { ow = w[j]; od = d[j]; } }\n"
+"  }\n"
+"  return (cov >= 0.5 || bw < 0) ? od : bd;\n"
+"}\n"
+"float ps(V v) : SV_Depth { return f(v); }\n";
+static struct { ID3D11VertexShader *vs; ID3D11PixelShader *ps; ID3D11Buffer *cb; ID3D11DepthStencilState *dss; int failed; } g_dm;
+static int dm_init(ID3D11Device *dev)
+{
+    HMODULE dc; PFN_D3DCompile compile; ID3D10Blob *code = NULL, *err = NULL; HRESULT hr; D3D11_BUFFER_DESC bd; D3D11_DEPTH_STENCIL_DESC dd;
+    if (g_dm.vs && g_dm.ps && g_dm.cb && g_dm.dss) return 1;
+    if (g_dm.failed) return 0;
+    g_dm.failed = 1;
+    dc = GetModuleHandleW(L"d3dcompiler_47.dll"); if (!dc) dc = LoadLibraryW(L"d3dcompiler_47.dll");
+    compile = dc ? (PFN_D3DCompile)(void *)GetProcAddress(dc, "D3DCompile") : NULL;
+    if (!compile) { LOG(log_s("dm: D3DCompile not available")); return 0; }
+    hr = compile(DM_HLSL, sizeof DM_HLSL - 1, "kcd_dlss_dm", NULL, NULL, "vs", "vs_5_0", (1 << 15), 0, &code, &err);
+    if (FAILED(hr) || !code || FAILED(ID3D11Device_CreateVertexShader(dev, ID3D10Blob_GetBufferPointer(code), ID3D10Blob_GetBufferSize(code), NULL, &g_dm.vs))) { REL(code); REL(err); LOG(log_s("dm: vertex shader failed")); return 0; }
+    REL(code); REL(err);
+    hr = compile(DM_HLSL, sizeof DM_HLSL - 1, "kcd_dlss_dm", NULL, NULL, "ps", "ps_5_0", (1 << 15), 0, &code, &err);
+    if (FAILED(hr) || !code || FAILED(ID3D11Device_CreatePixelShader(dev, ID3D10Blob_GetBufferPointer(code), ID3D10Blob_GetBufferSize(code), NULL, &g_dm.ps))) {
+        if (err) { LOG(log_s("dm: pixel shader failed: "); log_s((const char *)ID3D10Blob_GetBufferPointer(err))); } else LOG(log_s("dm: pixel shader failed"));
+        REL(code); REL(err); return 0; }
+    REL(code); REL(err);
+    memset(&bd, 0, sizeof bd); bd.ByteWidth = 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    if (FAILED(ID3D11Device_CreateBuffer(dev, &bd, NULL, &g_dm.cb))) { LOG(log_s("dm: constant buffer failed")); return 0; }
+    memset(&dd, 0, sizeof dd); dd.DepthEnable = TRUE; dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL; dd.DepthFunc = D3D11_COMPARISON_ALWAYS;
+    if (FAILED(ID3D11Device_CreateDepthStencilState(dev, &dd, &g_dm.dss))) { LOG(log_s("dm: depth state failed")); return 0; }
+    g_dm.failed = 0;
+    return 1;
+}
+/* called from my_OMSetDS when the game sets its next depth-stencil state after the fill: the fill is drawn, the UI not yet */
+static void dm_fix(ID3D11DeviceContext *c)
+{
+    ID3D11Device *dev = NULL; ID3D11ShaderResourceView *dsrv, *srv0[1]; ID3D11Buffer *cb0[1]; ID3D11Resource *res = NULL; D3D11_TEXTURE2D_DESC td; D3D11_VIEWPORT vp;
+    CtxState st; BYTE *self = WH(A_RENDERER); float k[4]; UINT rw, rh, nw, nh; static int logged;
+    if (!self) return;
+    rw = *(UINT *)(self + R_RENDER_W); rh = *(UINT *)(self + R_RENDER_H); nw = *(UINT *)(self + R_NATIVE_W); nh = *(UINT *)(self + R_NATIVE_H);
+    if (!rw || !rh || (rw == nw && rh == nh)) return;
+    dsrv = depth_view(); if (!dsrv) return;
+    ID3D11DeviceContext_GetDevice(c, &dev);
+    if (dev && dm_init(dev)) {
+        ctx_save(c, &st);
+        if (st.dsv) ID3D11DepthStencilView_GetResource(st.dsv, &res);
+        if (res && tex_desc(res, &td) && td.Width == nw && td.Height == nh) {   /* else not the output-size depth: leave it alone */
+            if (!logged++) LOG(log_s("dm: depth fill seen after the stretch, rewriting the output-size depth for the UI ("); log_u(rw); log_s("x"); log_u(rh); log_s(" -> "); log_u(nw); log_s("x"); log_u(nh); log_s(")"));
+            k[0] = (float)rw; k[1] = (float)rh; k[2] = g_jt_sx * g_dl.jx; k[3] = g_jt_sy * g_dl.jy;
+            ID3D11DeviceContext_UpdateSubresource(c, (ID3D11Resource *)g_dm.cb, 0, NULL, k, 0, 0);
+            srv0[0] = dsrv; cb0[0] = g_dm.cb;
+            vp.TopLeftX = 0; vp.TopLeftY = 0; vp.Width = (float)nw; vp.Height = (float)nh; vp.MinDepth = 0; vp.MaxDepth = 1;
+            ID3D11DeviceContext_OMSetRenderTargets(c, 0, NULL, st.dsv);
+            ID3D11DeviceContext_RSSetViewports(c, 1, &vp);
+            ID3D11DeviceContext_RSSetState(c, NULL);
+            ID3D11DeviceContext_OMSetBlendState(c, NULL, NULL, 0xffffffffu);
+            ID3D11DeviceContext_OMSetDepthStencilState(c, g_dm.dss, 0);
+            ID3D11DeviceContext_IASetInputLayout(c, NULL);
+            ID3D11DeviceContext_IASetPrimitiveTopology(c, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            ID3D11DeviceContext_VSSetShader(c, g_dm.vs, NULL, 0);
+            ID3D11DeviceContext_GSSetShader(c, NULL, NULL, 0);
+            ID3D11DeviceContext_HSSetShader(c, NULL, NULL, 0);
+            ID3D11DeviceContext_DSSetShader(c, NULL, NULL, 0);
+            ID3D11DeviceContext_PSSetShader(c, g_dm.ps, NULL, 0);
+            ID3D11DeviceContext_PSSetConstantBuffers(c, 0, 1, cb0);
+            ID3D11DeviceContext_PSSetShaderResources(c, 0, 1, srv0);
+            ID3D11DeviceContext_Draw(c, 3, 0);
+            srv0[0] = NULL; ID3D11DeviceContext_PSSetShaderResources(c, 0, 1, srv0);
+        }
+        REL(res);
+        ctx_restore(c, &st);
+    }
+    REL(dev); REL(dsrv);
+}
 static void dlss_frame(BYTE *self)
 {
     ID3D11ShaderResourceView *dsrv, *csrv = NULL; ID3D11RenderTargetView *rtv = NULL;
@@ -1758,7 +1932,7 @@ static void dlss_frame(BYTE *self)
                                  log_s(", depth "); log_u(dd.Width); log_s("x"); log_u(dd.Height); log_s(" fmt "); log_u(dd.Format);
                                  log_s(", target "); log_u(od.Width); log_s("x"); log_u(od.Height); log_s(" fmt "); log_u(od.Format);
                                  log_s(", renderer "); log_u(rw); log_s("x"); log_u(rh); log_s(" -> "); log_u(nw); log_s("x"); log_u(nh);
-                                 log_s(", AA mode "); log_i(*(int *)(g_wh_base + RVA_AA_MODE)));
+                                 log_s(", AA mode "); log_i(WH(A_AA_MODE) ? *(int *)WH(A_AA_MODE) : -1));
         {   /* diagnostic (blue flash on save load, user 2026-11-08): does the stretch input change identity? */
             static ID3D11Resource *last_col, *last_out; static unsigned int changes;
             if ((col_res != last_col || out_res != last_out) && g_dl.frames > 0 && changes < 12) {
@@ -1870,9 +2044,9 @@ static int cvar_int(void *cv) { return cv ? ((PFN_GetIVal)VT(cv, 2))(cv) : 0; }
 static void cvars_lookup(void)
 {
     void *console;
-    if (g_cv_tried || !g_wh_base) return;
+    if (g_cv_tried || !g_wh_base || !WH(A_CONSOLE)) return;
     g_cv_tried = 1;
-    console = *(void **)(g_wh_base + RVA_CONSOLE);
+    console = *(void **)WH(A_CONSOLE);
     if (!console || !readable((BYTE *)console, 8) || !readable(*(BYTE **)console, 8 * 24)) { LOG(log_s("console object not ready: mip bias from the renderer sizes only")); g_cv_tried = 0; return; }
     g_cv_width = ((PFN_GetCVar)VT(console, 23))(console, "r_Width");
     g_cv_native = ((PFN_GetCVar)VT(console, 23))(console, "r_NativeWidth");
@@ -1887,8 +2061,8 @@ typedef void (*PFN_ExecStr)(void *console, const char *cmd, BYTE silent, BYTE de
 static void *console_ptr(void)
 {
     void *console;
-    if (!g_wh_base) return NULL;
-    console = *(void **)(g_wh_base + RVA_CONSOLE);
+    if (!g_wh_base || !WH(A_CONSOLE)) return NULL;
+    console = *(void **)WH(A_CONSOLE);
     if (!console || !readable((BYTE *)console, 8) || !readable(*(BYTE **)console, 8 * 36)) return NULL;
     return console;
 }
@@ -1934,6 +2108,8 @@ static void exec_commands(char *p, const char *src)
         while (*p == ' ' || *p == '=') p++;
         i = 0; while (*p && *p != ';' && *p != '\r' && *p != '\n' && i < 127) val[i++] = *p++; val[i] = 0;
         while (i > 0 && val[i - 1] == ' ') val[--i] = 0;
+        if (streq(name, "gifull")) { gi_set((int)parse_num(val), src); continue; }   /* GI size on/off, same as the console variable r_DLSSGI */
+        if (streq(name, "invfix")) { g_cfg.invfix = (int)parse_num(val); LOG(log_s("exec("); log_s(src); log_s("): InventoryFix "); log_i(g_cfg.invfix)); continue; }   /* BUG-9: live switch for a before/after check */
         if (streq(name, "kick")) { kick_activate("kick command"); continue; }   /* 0.8.0: experiment: the renderer re-activate routine (minimizes the window too) */
         if (streq(name, "fxoff") || streq(name, "fxon") || streq(name, "fxwrap")) { fx_set(val, name[2] == 'o' ? 1 : name[2] == 'w' ? 2 : 0, src); continue; }
         if (streq(name, "mode")) { int m = mode_parse(val); if (m == -2) LOG(log_s("exec("); log_s(src); log_s("): mode "); log_s(val); log_s(": unknown (Native, UltraQuality, Quality, Balanced, Performance, UltraPerformance, Auto)")); else mode_apply(m, src); continue; }
@@ -2003,7 +2179,7 @@ static void mode_apply(int mode, const char *src)
         void *cvf = cvar_find("r_Fullscreen"), *cvn = cvar_find("r_FullscreenNativeRes"); DEVMODEW dm;
         memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
         if (cvf && cvar_int(cvf) && cvn && cvar_int(cvn) && EnumDisplaySettingsW(NULL, ENUM_REGISTRY_SETTINGS, &dm) && dm.dmPelsWidth >= 640 && dm.dmPelsHeight >= 480) { nw = dm.dmPelsWidth; nh = dm.dmPelsHeight; how = "factor table, desktop size"; }
-        else if (g_wh_base) { BYTE *r = g_wh_base + RVA_RENDERER; nw = *(UINT *)(r + R_NATIVE_W); nh = *(UINT *)(r + R_NATIVE_H); }
+        else if (g_wh_base && WH(A_RENDERER)) { BYTE *r = WH(A_RENDERER); nw = *(UINT *)(r + R_NATIVE_W); nh = *(UINT *)(r + R_NATIVE_H); }
     }
     if (nw < 640 || nh < 480 || nw > 16384 || nh > 16384) { nw = (UINT)GetSystemMetrics(SM_CXSCREEN); nh = (UINT)GetSystemMetrics(SM_CYSCREEN); }
     if (mode == 5) { rw = nw; rh = nh; how = "native"; }
@@ -2033,6 +2209,8 @@ static void mode_apply(int mode, const char *src)
 #define CVAR_DLSSMODE "r_DLSSMode"
 #define CVAR_DLSSPRESET "r_DLSSPreset"   /* 0.7.2: menu row "DLSS Model": 0 Transformer, 1 CNN (ini Preset =) */
 static void *g_cv_dlsspreset; static int g_dlsspreset_last = -99;
+#define CVAR_DLSSGI "r_DLSSGI"   /* GIFullRes from the in-game console: 0 the game's own GI values, 1 the plugin's (1/3 of the render size) */
+static void *g_cv_gi; static int g_gi_last = -99;
 typedef void *(*PFN_RegisterInt)(void *console, const char *name, int value, int flags, const char *help, void *callback);
 static void *g_cv_dlssmode; static int g_dlssmode_last = -99;
 static const int MENU2MODE[6] = { 5, 4, 2, 1, 0, 3 };
@@ -2092,6 +2270,10 @@ static void dlssmode_register(void)
             "KCD DLSS plugin: DLSS model set from the options menu. 0 Transformer (DLSS 4), 1 CNN (DLSS 3), 2 Unsupported (no upscaler on this system)", NULL);
     if (g_cv_dlsspreset) { g_dlsspreset_last = cvar_int(g_cv_dlsspreset); LOG(log_s("menu: cvar " CVAR_DLSSPRESET " registered, value "); log_i(g_dlsspreset_last)); }
     else LOG(log_s("menu: cvar " CVAR_DLSSPRESET " could not be registered"));
+    g_cv_gi = cvar_find(CVAR_DLSSGI);
+    if (!g_cv_gi) g_cv_gi = ((PFN_RegisterInt)VT(console, CON_SLOT_REGISTERINT))(console, CVAR_DLSSGI, g_cfg.gifull ? 1 : 0, 0,
+            "KCD DLSS plugin: global illumination size (ini GIFullRes). 0 the game's own values, 1 a third of the render size (e_svoTI_LowSpecMode 3 + e_svoTI_ResScaleBase 0)", NULL);
+    if (g_cv_gi) g_gi_last = cvar_int(g_cv_gi);
 }
 static void dlsspreset_sync(void)         /* after a preset change from the ini/console: show it in the menu cvar */
 {
@@ -2183,10 +2365,9 @@ static void aa_pin_install(const char *src)
     was = cvar_int(g_cv_aa);
     if (was != 0) ((PFN_ForceSet)VT(g_cv_aa, 10))(g_cv_aa, "0");
     LOG(log_s("pin("); log_s(src); log_s("): r_AntialiasingMode was "); log_i(was); log_s(", now "); log_i(cvar_int(g_cv_aa));
-        log_s("; Set/ForceSet of its cvar class hooked: the value stays 0 (no live AA switch at startup or on a settings Apply); renderer AA copy "); log_i(*(int *)(g_wh_base + RVA_AA_MODE)));
+        log_s("; Set/ForceSet of its cvar class hooked: the value stays 0 (no live AA switch at startup or on a settings Apply); renderer AA copy "); log_i(WH(A_AA_MODE) ? *(int *)WH(A_AA_MODE) : -1));
 }
 #define PREREQ_CMDS "r_FullscreenNativeRes 1; r_AntialiasingMode 0; r_MotionVectors 1; r_MotionBlurGBufferVelocity 1"   /* 0.6.8: MaxViewDist left at the game's 32 m (user) */
-#define GI_CMDS "e_svoTI_ResScaleBase 1"
 /* 0.6.8: switching r_FullscreenNativeRes 0 -> 1 live in exclusive fullscreen left the screen black until the user alt-tabbed (the
  * focus loss/regain resets the swap chain; run060). If the stretch keeps failing after that switch, the plugin does the same:
  * minimize + restore its own window once. */
@@ -2207,12 +2388,99 @@ static DWORD WINAPI kick_thread(LPVOID p)
     return 0;
 }
 static BOOL CALLBACK find_wnd_cb(HWND h, LPARAM lp) { DWORD pid = 0; GetWindowThreadProcessId(h, &pid); if (pid == (DWORD)lp && IsWindowVisible(h) && !GetWindow(h, GW_OWNER)) { g_wnd = h; return FALSE; } return TRUE; }
+/* GI (SVOGI) buffer size = render size / (e_svoTI_ResScaleBase + e_svoTI_LowSpecMode / GPU count), no zero guard in the game
+ * (WHGame+0x62539c). Game presets: LowSpecMode 6 / 4 / 4 / 2 / 1 (Low..Ultra) with ResScaleBase 2 = 1/8 .. 1/3: at a DLSS render
+ * size that is a few hundred pixels across and shows as blocks in shaded areas. LowSpecMode above 0 also sets the shader flag
+ * %_RT_SAMPLE0: cone-trace rays stop after 8 octree steps instead of 64 (CommonSVO.cfi); 0 with a full-size buffer halved the
+ * frame rate on the user's PC (2026-11-15). GIFullRes on (user's choice 2026-11-15): LowSpecMode 3 + ResScaleBase 0 = 1/3 on
+ * every preset, short rays kept, plus the two cone values below. A game value of LowSpecMode 0 (long rays, no preset has it) is kept: then 0 + ResScaleBase 3.
+ * The game's own values are remembered (g_gi_slm/g_gi_srb) so r_DLSSGI 0 / gifull 0 can put them back. */
+static int g_gi_slm = -1, g_gi_srb = -1;
+/* also part of "on" (user 2026-11-15, the values from his user.cfg): e_svoTI_ConeMaxLength 16, e_svoTI_DiffuseConeWidth 32.
+ * Float cvars; the game's own values are kept x1000 (-1 = never seen, then "off" leaves that cvar alone). */
+#define GI_CONE_N 2
+static const char *const GI_CONE_NAME[GI_CONE_N] = { "e_svoTI_ConeMaxLength", "e_svoTI_DiffuseConeWidth" };
+static const int GI_CONE_WANT[GI_CONE_N] = { 16000, 32000 };
+static int g_gi_cone[GI_CONE_N] = { -1, -1 };
+typedef float (*PFN_GiGetF)(void *cv);
+static int gi_cone_ok(void)   /* 1 = both hold the plugin's values; other values are the game's: remember them */
+{
+    int i, ok = 1;
+    for (i = 0; i < GI_CONE_N; i++) {
+        void *cv = cvar_find(GI_CONE_NAME[i]); int m;
+        if (!cv) continue;
+        m = (int)(((PFN_GiGetF)VT(cv, 4))(cv) * 1000.0f + 0.5f);
+        if (m != GI_CONE_WANT[i]) { ok = 0; if (m >= 0) g_gi_cone[i] = m; }
+    }
+    return ok;
+}
+static void gi_cone_set(int i, int milli, const char *src)   /* "name I.FFF" */
+{
+    char buf[64]; int k = 0, j, n = milli / 1000, f = milli % 1000; char d[12]; int dn = 0;
+    for (j = 0; GI_CONE_NAME[i][j]; j++) buf[k++] = GI_CONE_NAME[i][j];
+    buf[k++] = ' ';
+    do { d[dn++] = (char)('0' + n % 10); n /= 10; } while (n && dn < 10);
+    while (dn) buf[k++] = d[--dn];
+    buf[k++] = '.'; buf[k++] = (char)('0' + f / 100); buf[k++] = (char)('0' + f / 10 % 10); buf[k++] = (char)('0' + f % 10); buf[k] = 0;
+    exec_commands(buf, src);
+}
+static int gi_want_lsm(void) { return g_gi_slm == 0 ? 0 : 3; }
+static int gi_want_rsb(void) { return g_gi_slm == 0 ? 3 : 0; }
+static int gi_check(void)   /* 1 = both cvars hold the plugin's values; values that are not ours are the game's: remember them */
+{
+    void *lm = cvar_find("e_svoTI_LowSpecMode"), *rb = cvar_find("e_svoTI_ResScaleBase"); int a, b, wl, wr;
+    if (!lm || !rb) return 1;
+    a = cvar_int(lm); b = cvar_int(rb);
+    if (g_gi_slm < 0) { g_gi_slm = a; g_gi_srb = b; }
+    else { wl = gi_want_lsm(); wr = gi_want_rsb(); if (a != wl) g_gi_slm = a; if (b != wr) g_gi_srb = b; }
+    return a == gi_want_lsm() && b == gi_want_rsb();
+}
+static void gi_cmd2(const char *n1, int v1, const char *n2, int v2, const char *src)   /* "n1 v1; n2 v2", values 0..9 */
+{
+    char buf[96]; int i = 0, k;
+    for (k = 0; n1[k]; k++) { buf[i++] = n1[k]; }
+    buf[i++] = ' '; buf[i++] = (char)('0' + v1); buf[i++] = ';'; buf[i++] = ' ';
+    for (k = 0; n2[k]; k++) { buf[i++] = n2[k]; }
+    buf[i++] = ' '; buf[i++] = (char)('0' + v2); buf[i] = 0;
+    exec_commands(buf, src);
+}
+/* the non-zero value goes first, so the sum is never 0 between the two sets */
+static void gi_apply(const char *src)
+{
+    int i, size_ok = gi_check();
+    if (!gi_cone_ok()) for (i = 0; i < GI_CONE_N; i++) gi_cone_set(i, GI_CONE_WANT[i], src);
+    if (size_ok) return;
+    if (gi_want_lsm()) gi_cmd2("e_svoTI_LowSpecMode", gi_want_lsm(), "e_svoTI_ResScaleBase", gi_want_rsb(), src);
+    else gi_cmd2("e_svoTI_ResScaleBase", gi_want_rsb(), "e_svoTI_LowSpecMode", gi_want_lsm(), src);
+}
+static void gi_restore(const char *src)
+{
+    int i;
+    for (i = 0; i < GI_CONE_N; i++) if (g_gi_cone[i] >= 0) gi_cone_set(i, g_gi_cone[i], src);
+    if (g_gi_slm < 0 || g_gi_slm > 9 || g_gi_srb < 0 || g_gi_srb > 9 || g_gi_slm + g_gi_srb == 0) return;
+    if (g_gi_srb) gi_cmd2("e_svoTI_ResScaleBase", g_gi_srb, "e_svoTI_LowSpecMode", g_gi_slm, src);
+    else gi_cmd2("e_svoTI_LowSpecMode", g_gi_slm, "e_svoTI_ResScaleBase", g_gi_srb, src);
+}
 static void prereq_apply(const char *src)
 {
     char buf[256]; int i; void *cv;
     if (g_cfg.prereq && !g_startup_done) { cv = cvar_find("r_FullscreenNativeRes"); if (cv && cvar_int(cv) == 0) g_flipped = 1; }
     if (g_cfg.prereq) { for (i = 0; PREREQ_CMDS[i] && i < 255; i++) buf[i] = PREREQ_CMDS[i]; buf[i] = 0; exec_commands(buf, src); }
-    if (g_cfg.gifull) { for (i = 0; GI_CMDS[i] && i < 255; i++) buf[i] = GI_CMDS[i]; buf[i] = 0; exec_commands(buf, src); }
+    if (g_cfg.gifull) gi_apply(src);
+}
+static void gi_set(int on, const char *src)
+{
+    g_cfg.gifull = on ? 1 : 0;
+    LOGC(log_s("gi: GIFullRes "); log_i(g_cfg.gifull); log_s(" ("); log_s(src); log_s(")"));
+    if (g_cfg.gifull) gi_apply(src); else gi_restore(src);
+}
+static void gi_poll(void)   /* r_DLSSGI typed in the game console */
+{
+    int v;
+    if (!g_cv_gi) return;
+    v = cvar_int(g_cv_gi); if (v == g_gi_last) return;
+    g_gi_last = v;
+    gi_set(v, "r_DLSSGI");
 }
 /* 0.8.1 (BUG-3): can an upscaler run? Decided on the device the renderer draws with, not on the adapters the game only enumerates. */
 static void upscaler_decide(void)
@@ -2237,7 +2505,7 @@ static void cvars_exec_once(void)
     if (!console_ptr()) return;   /* retry next frame */
     upscaler_decide();
     prereq_apply("init");
-    LOG(log_s("exec(init): renderer AA mode copy "); log_i(*(int *)(g_wh_base + RVA_AA_MODE)); log_s(" (0 = the game's SMAA/TAA is off, DLSS does the AA)"));
+    LOG(log_s("exec(init): renderer AA mode copy "); log_i(WH(A_AA_MODE) ? *(int *)WH(A_AA_MODE) : -1); log_s(" (0 = the game's SMAA/TAA is off, DLSS does the AA)"));
     g_startup_done = 1;
     if (g_cfg.exec[0]) exec_commands(g_cfg.exec, "ini");
     if (g_cfg.mode == -1) {   /* 0.8.2 (BUG-7): Auto left the game's resolution alone, so with the game at the output resolution no frame was ever upscaled and the log only said "waiting" */
@@ -2255,7 +2523,7 @@ static void watchdog(void)
         cv = cvar_find("r_AntialiasingMode"); if (cv && cvar_int(cv) != 0) bad = 1;
         cv = cvar_find("r_FullscreenNativeRes"); if (cv && cvar_int(cv) != 1) bad = 1;
     }
-    if (g_cfg.gifull) { cv = cvar_find("e_svoTI_ResScaleBase"); if (cv && cvar_int(cv) != 1) bad = 1; }
+    if (g_cfg.gifull && (!gi_check() || !gi_cone_ok())) bad = 1;
     if (!bad && !badmode) return;
     last_fix = now; fixes++;
     if (fixes <= 8 || (fixes % 20) == 0) LOG(log_s("watchdog: the game changed a prerequisite cvar (settings menu / profile re-applied): re-forcing (fix "); log_i(fixes); log_s(")"));
@@ -2324,7 +2592,7 @@ static void res_probe(const char *tag, int force)
         if ((c = cvar_find("r_Fullscreen"))) v[4] = cvar_int(c);
         if ((c = cvar_find("r_FullscreenNativeRes"))) v[5] = cvar_int(c);
     }
-    if (g_wh_base) { BYTE *r = g_wh_base + RVA_RENDERER; v[6] = (int)*(UINT *)(r + R_NATIVE_W); v[7] = (int)*(UINT *)(r + R_NATIVE_H); }
+    if (g_wh_base && WH(A_RENDERER)) { BYTE *r = WH(A_RENDERER); v[6] = (int)*(UINT *)(r + R_NATIVE_W); v[7] = (int)*(UINT *)(r + R_NATIVE_H); }
     EnumWindows(res_wnd_cb, (LPARAM)&w);
     if (w && GetClientRect(w, &rc)) { v[8] = (int)(rc.right - rc.left); v[9] = (int)(rc.bottom - rc.top); }
     memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
@@ -2382,7 +2650,7 @@ static void frame_tick(void)
     }
     if (g_startup_done) {
         if (g_fx_pending && fx_scan()) { g_fx_pending = 0; LOG(log_s("exec(ini): post effects ready now, Exec line re-run")); exec_commands(g_cfg.exec, "ini"); }
-        cmdfile_poll(); watchdog(); dlssmode_register(); dlssmode_poll(); dlsspreset_poll();
+        cmdfile_poll(); watchdog(); dlssmode_register(); dlssmode_poll(); dlsspreset_poll(); gi_poll();
     }
 }
 /* one-shot dump of cvars relevant to the one-frame blue tint (CHANGES row 29) */
@@ -2391,8 +2659,8 @@ static void cvars_dump_once(void)
     static int done; void *console; int i;
     static const char *names[] = { "r_ShadersAsyncCompiling", "r_ShadersAsyncActivation", "r_ColorGrading", "r_HDRRendering", "r_MotionBlur",
                                    "r_Sharpening", "r_SunShafts", "r_Flares", "r_PostProcessEffects", "r_ShadersPrecache" };
-    if (done || !g_wh_base) return;
-    console = *(void **)(g_wh_base + RVA_CONSOLE);
+    if (done || !g_wh_base || !WH(A_CONSOLE)) return;
+    console = *(void **)WH(A_CONSOLE);
     if (!console || !readable((BYTE *)console, 8) || !readable(*(BYTE **)console, 8 * 24)) return;
     done = 1;
     LOG(log_s("cvars:");
@@ -2401,8 +2669,8 @@ static void cvars_dump_once(void)
 static float mip_bias_now(void)
 {
     BYTE *r; UINT rw = 0, nw = 0;
-    if (!g_wh_base || !g_cfg.mipbias) return 0;
-    r = g_wh_base + RVA_RENDERER;
+    if (!g_wh_base || !WH(A_RENDERER) || !g_cfg.mipbias) return 0;
+    r = WH(A_RENDERER);
     rw = *(UINT *)(r + R_RENDER_W); nw = *(UINT *)(r + R_NATIVE_W);
     if (!rw || !nw || rw >= nw) {                            /* renderer sizes not computed yet (or native still = render): ask the cvars */
         cvars_lookup();
@@ -2435,7 +2703,7 @@ typedef void (STDMETHODCALLTYPE *PFN_OMSetRTUAV)(ID3D11DeviceContext *, UINT, ID
 /* 0.6.6: NVIDIA's driver gives every immediate context its own (heap) vtable, so the originals are kept per vtable: hooking device #1's
  * context did nothing for the renderer's context (fresh-install test run058). */
 #define CTXH_MAX 12
-static struct { void **vt; PFN_SetSamplers ss[6]; PFN_OMSetRT omrt; PFN_OMSetRTUAV omrtuav; } g_ctxh[CTXH_MAX]; static int g_ctxh_n;
+static struct { void **vt; PFN_SetSamplers ss[6]; PFN_OMSetRT omrt; PFN_OMSetRTUAV omrtuav; void (STDMETHODCALLTYPE *omds)(ID3D11DeviceContext *, ID3D11DepthStencilState *, UINT); } g_ctxh[CTXH_MAX]; static int g_ctxh_n;
 static int ctxh_find(ID3D11DeviceContext *c) { void **vt = *(void ***)c; int i; for (i = 0; i < g_ctxh_n; i++) if (g_ctxh[i].vt == vt) return i; return 0; }
 static const int SS_SLOT[6] = { 10, 26, 32, 61, 65, 70 };   /* ID3D11DeviceContext: PS, VS, GS, HS, DS, CS SetSamplers */
 
@@ -2488,12 +2756,20 @@ static void STDMETHODCALLTYPE my_CSSetSamplers(ID3D11DeviceContext *c, UINT s, U
 static void rt_track(ID3D11RenderTargetView *const *rtvs, UINT n)
 {
     ID3D11Resource *res = NULL; D3D11_TEXTURE2D_DESC d; UINT nw, nh; int native = 0;
-    if (!rtvs || !n || !rtvs[0] || !g_wh_base) { g_rt_native = 0; return; }
-    nw = *(UINT *)(g_wh_base + RVA_RENDERER + R_NATIVE_W); nh = *(UINT *)(g_wh_base + RVA_RENDERER + R_NATIVE_H);
+    if (!rtvs || !n || !rtvs[0] || !g_wh_base || !WH(A_RENDERER)) { g_rt_native = 0; return; }
+    nw = *(UINT *)(WH(A_RENDERER) + R_NATIVE_W); nh = *(UINT *)(WH(A_RENDERER) + R_NATIVE_H);
     ID3D11RenderTargetView_GetResource(rtvs[0], &res);
     if (res && tex_desc(res, &d) && nw && d.Width == nw && d.Height == nh) native = 1;
     REL(res);
     g_rt_native = native;
+}
+/* BUG-9: find the game's depth fill after the stretch by its state, run dm_fix once it has been drawn */
+static void STDMETHODCALLTYPE my_OMSetDS(ID3D11DeviceContext *c, ID3D11DepthStencilState *ds, UINT ref)
+{
+    if (g_df_state == 2) { g_df_state = 0; dm_fix(c); }
+    g_ctxh[ctxh_find(c)].omds(c, ds, ref);
+    if (g_df_state == 1 && ds) { D3D11_DEPTH_STENCIL_DESC fd; ID3D11DepthStencilState_GetDesc(ds, &fd);
+        if (fd.DepthEnable && fd.DepthFunc == D3D11_COMPARISON_ALWAYS && fd.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ALL && !fd.StencilEnable) g_df_state = 2; }
 }
 static void STDMETHODCALLTYPE my_OMSetRT(ID3D11DeviceContext *c, UINT n, ID3D11RenderTargetView *const *rt, ID3D11DepthStencilView *ds) { rt_track(rt, n); g_tick_ctx = c; frame_tick(); g_ctxh[ctxh_find(c)].omrt(c, n, rt, ds); }
 static void STDMETHODCALLTYPE my_OMSetRTUAV(ID3D11DeviceContext *c, UINT n, ID3D11RenderTargetView *const *rt, ID3D11DepthStencilView *ds, UINT us, UINT nu, ID3D11UnorderedAccessView *const *uav, const UINT *ic)
@@ -2525,11 +2801,11 @@ static void hook_ctx(ID3D11DeviceContext *ctx)
     if (!VirtualProtect(&vt[10], 61 * sizeof(void *), PAGE_READWRITE, &old)) { LOG(log_s("cannot write the context vtable: no mip bias")); return; }
     g_ctxh[slot].vt = vt;
     for (i = 0; i < 6; i++) g_ctxh[slot].ss[i] = (PFN_SetSamplers)vt[SS_SLOT[i]];
-    g_ctxh[slot].omrt = (PFN_OMSetRT)vt[33]; g_ctxh[slot].omrtuav = (PFN_OMSetRTUAV)vt[34];
+    g_ctxh[slot].omrt = (PFN_OMSetRT)vt[33]; g_ctxh[slot].omrtuav = (PFN_OMSetRTUAV)vt[34]; g_ctxh[slot].omds = (void (STDMETHODCALLTYPE *)(ID3D11DeviceContext *, ID3D11DepthStencilState *, UINT))vt[36];
     if (slot == g_ctxh_n) g_ctxh_n++;
     vt[10] = (void *)my_PSSetSamplers; vt[26] = (void *)my_VSSetSamplers; vt[32] = (void *)my_GSSetSamplers;
     vt[61] = (void *)my_HSSetSamplers; vt[65] = (void *)my_DSSetSamplers; vt[70] = (void *)my_CSSetSamplers;
-    vt[33] = (void *)my_OMSetRT; vt[34] = (void *)my_OMSetRTUAV;
+    vt[33] = (void *)my_OMSetRT; vt[34] = (void *)my_OMSetRTUAV; vt[36] = (void *)my_OMSetDS;
     VirtualProtect(&vt[10], 61 * sizeof(void *), old, &tmp);
     LOG(log_s("sampler cache: context vtable "); log_x((ULONG_PTR)vt); log_s(rehook ? " RE-hooked, address reused (#" : " hooked (#"); log_i(slot + 1); log_s(", 6 SetSamplers stages + OMSetRenderTargets): mip bias applied at bind time"));
 }
@@ -2550,27 +2826,31 @@ static void hook_sampler_state(ID3D11Device *dev)
 
 static void hook_stretch(BYTE *self, BYTE draw)
 {
+    g_df_state = 0;
     g_orig_stretch(self, draw);
     if (!draw || g_dl.disabled || g_no_upscaler || !g_ngx.core || !g_cfg.dlss) { g_sc_bias = 0; return; }
-    if (self != g_wh_base + RVA_RENDERER) { dl_fail("stretch called on an unexpected renderer object"); return; }
+    if (self != WH(A_RENDERER)) { dl_fail("stretch called on an unexpected renderer object"); return; }
     if (*(int *)(self + R_SUPERSAMPLE) > 1) { g_sc_bias = 0; return; }                    /* the game's downsample path */
     if (*(UINT *)(self + R_RENDER_W) == *(UINT *)(self + R_NATIVE_W) && *(UINT *)(self + R_RENDER_H) == *(UINT *)(self + R_NATIVE_H)) { g_sc_bias = 0; return; }
     dlss_frame(self);
+    if (g_cfg.invfix) g_df_state = 1;
 }
 
 /* $VelocityObjects is created as eTF 0x0b R8G8S (8-bit, sqrt-encoded): 1-2 px error on a 1 px motion = useless for DLSS
  * (aliasing on moving objects, user 2026-11-08). Change the eTF immediate to 0x0e R16G16F at both creation sites
  * (left/mono 0x182020671 and the stereo right eye 0x1820206bc); the game's encode/decode math is unchanged, just lossless. */
-#define RVA_VELFMT_L 0x2020671u
-#define RVA_VELFMT_R 0x20206bcu
 static void velocity_fmt_patch(BYTE *base)
 {
     static const BYTE ctx_l[23] = { 0x44,0x8b,0x05,0xa4,0x52,0x4b,0x01, 0x48,0x8d,0x05,0x6d,0xf0,0x76,0x01, 0x8b,0x15,0x93,0x52,0x4b,0x01, 0x41,0xb1,0x0b };
+    static const BYTE ctx_m[23] = { 1,1,1,0,0,0,0, 1,1,1,0,0,0,0, 1,1,0,0,0,0, 1,1,1 };   /* the three rip disp32s differ between store builds */
     static const BYTE ctx_r[8]  = { 0x41,0xb1,0x0b, 0x44,0x89,0x74,0x24,0x38 };
-    BYTE *l = base + RVA_VELFMT_L, *r = base + RVA_VELFMT_R; DWORD old, tmp; int n = 0;
+    static const unsigned char need[] = { A_VELFMT_L, A_VELFMT_R };
+    BYTE *l = WH(A_VELFMT_L), *r = WH(A_VELFMT_R); DWORD old, tmp; int n = 0;
+    (void)base;
+    if (!addr_all(need, sizeof need)) { LOGC(log_s("velocity: unsupported game version, 8-bit velocity kept (unresolved: "); log_missing(need, sizeof need); log_s(")")); return; }
     if (!readable(l - 20, 23) || !readable(r, 8)) { LOGC(log_s("velocity: patch site unreadable: 8-bit velocity kept")); return; }
     if (l[2] == ETF_R16G16F && r[2] == ETF_R16G16F) { LOG(log_s("velocity: format already patched")); return; }
-    if (!same(l - 20, ctx_l, 23) || !same(r, ctx_r, 8)) { LOGC(log_s("velocity: creation-site bytes differ: 8-bit velocity kept")); return; }
+    if (!same_m(l - 20, ctx_l, ctx_m, 23) || !same(r, ctx_r, 8)) { LOGC(log_s("velocity: creation-site bytes differ: 8-bit velocity kept")); return; }
     if (VirtualProtect(l + 2, 1, PAGE_EXECUTE_READWRITE, &old)) { l[2] = ETF_R16G16F; VirtualProtect(l + 2, 1, old, &tmp); n++; }
     if (VirtualProtect(r + 2, 1, PAGE_EXECUTE_READWRITE, &old)) { r[2] = ETF_R16G16F; VirtualProtect(r + 2, 1, old, &tmp); n++; }
     FlushInstructionCache(GetCurrentProcess(), l, 1); FlushInstructionCache(GetCurrentProcess(), r, 1);
@@ -2580,17 +2860,21 @@ static void velocity_fmt_patch(BYTE *base)
 static void dlss_install(BYTE *base)
 {
     static const BYTE zero_ctx[16] = { 0x0f,0x85,0x8c,0xcb,0x86,0x00,0xb0,0x01, 0x49,0x83,0xa7,0x20,0x0f,0x00,0x00,0x00 };
+    static const BYTE zero_m[16] = { 1,1,0,0,0,0,1,1, 1,1,1,1,1,1,1,1 };   /* jne rel32: the rel32 differs between store builds */
     static const BYTE nop8[8] = { 0x90,0x90,0x90,0x90,0x90,0x90,0x90,0x90 };
-    BYTE *z = base + RVA_JITTER_ZERO, **slot = (BYTE **)(base + RVA_VT_UPSCALE); DWORD old, tmp;
+    static const unsigned char need[] = { A_RENDERER, A_VT_UPSCALE, A_FN_UPSCALE, A_DEPTH_SRV, A_JITTER_ZERO, A_POST_VIEW, A_POST_PROJ };   /* the per-frame DLSS path */
+    BYTE *z = WH(A_JITTER_ZERO), **slot = (BYTE **)WH(A_VT_UPSCALE), *fn = WH(A_FN_UPSCALE); DWORD old, tmp;
     g_wh_base = base;
     if (g_cfg.velpatch) velocity_fmt_patch(base); else LOG(log_s("velocity: format patch disabled by KCDDLSS.ini (8-bit velocity kept)"));
+    if (g_cfg.objectmv && !WH(A_VELOCITY_TEX)) LOG(log_s("velocity: unsupported game version, object motion vectors off (unresolved: VELOCITY_TEX)"));
+    if (!addr_all(need, sizeof need)) { LOGC(log_s("dlss: unsupported game version, upscale hook not installed (unresolved: "); log_missing(need, sizeof need); log_s(")")); return; }
     if (!readable(z - 8, 16) || !readable((BYTE *)slot, 8)) { LOGC(log_s("dlss: patch sites unreadable: upscale hook not installed")); return; }
     if (!g_cfg.jitter) LOG(log_s("dlss: jitter patch disabled by KCDDLSS.ini (game keeps zero jitter)"));
     else if (same(z, nop8, 8)) LOG(log_s("dlss: jitter zeroing already patched"));
-    else if (!same(z - 8, zero_ctx, 16)) { LOGC(log_s("dlss: jitter generator bytes differ: unsupported game version, upscale hook not installed")); return; }
+    else if (!same_m(z - 8, zero_ctx, zero_m, 16)) { LOGC(log_s("dlss: jitter generator bytes differ: unsupported game version, upscale hook not installed")); return; }
     else if (!VirtualProtect(z, 8, PAGE_EXECUTE_READWRITE, &old)) { LOGC(log_s("dlss: cannot write the jitter generator: upscale hook not installed")); return; }
-    else { memcpy(z, nop8, 8); VirtualProtect(z, 8, old, &tmp); FlushInstructionCache(GetCurrentProcess(), z, 8); LOG(log_s("dlss: jitter zeroing NOPed at WHGame.dll+"); log_x(RVA_JITTER_ZERO)); }
-    if (*slot != base + RVA_FN_UPSCALE) { LOG(log_s("dlss: vtable entry +0xab8 is "); log_x((ULONG_PTR)*slot); log_s(", expected WHGame.dll+"); log_x(RVA_FN_UPSCALE); log_s(": upscale hook not installed")); return; }
+    else { memcpy(z, nop8, 8); VirtualProtect(z, 8, old, &tmp); FlushInstructionCache(GetCurrentProcess(), z, 8); LOG(log_s("dlss: jitter zeroing NOPed at WHGame.dll+"); log_x((ULONG_PTR)(z - base))); }
+    if (*slot != fn) { LOG(log_s("dlss: vtable entry +0xab8 is "); log_x((ULONG_PTR)*slot); log_s(", expected WHGame.dll+"); log_x((ULONG_PTR)(fn - base)); log_s(": upscale hook not installed")); return; }
     if (!VirtualProtect(slot, 8, PAGE_READWRITE, &old)) { LOGC(log_s("dlss: cannot write the renderer vtable: upscale hook not installed")); return; }
     g_orig_stretch = (PFN_Stretch)(void *)*slot;
     *slot = (BYTE *)(void *)hook_stretch;
@@ -2648,10 +2932,10 @@ static void sharpen_patch(BYTE *base)
  * (slot 111). The "Unsupported" choices are added only when no upscaler exists (g_no_upscaler). Anything unexpected -> the
  * original call, the page is the stock one and the mode comes from KCDDLSS.ini. Replaces the Mods\KCDDLSS pak of BETA 1/2. */
 #include "menu_rows.h"
-#define RVA_CSYS_VT         0x268a6a8u   /* CSystem vtable (ISystem at offset 0, 213 slots) */
-#define RVA_FN_LOADXML_FILE 0xea3d98u    /* slot 112: XmlNodeRef *LoadXmlFromFile(this, XmlNodeRef *sret, const char *file, bool bReuseStrings) */
-#define RVA_FN_LOADXML_BUF  0xea3d70u    /* slot 111: XmlNodeRef *LoadXmlFromBuffer(this, XmlNodeRef *sret, const char *buf, size_t size, bool bReuseStrings) */
-#define RVA_PCRYPAK         0x29d1710u   /* ICryPak *gEnv->pCryPak */
+/* A_CSYS_VT: CSystem vtable (ISystem at offset 0, 213 slots) */
+/* A_FN_LOADXML_FILE: slot 112: XmlNodeRef *LoadXmlFromFile(this, XmlNodeRef *sret, const char *file, bool bReuseStrings) */
+/* A_FN_LOADXML_BUF: slot 111: XmlNodeRef *LoadXmlFromBuffer(this, XmlNodeRef *sret, const char *buf, size_t size, bool bReuseStrings) */
+/* A_PCRYPAK: ICryPak *gEnv->pCryPak */
 #define PAK_SLOT_FOPEN    37   /* FILE *FOpen(name, "rb", flags) */
 #define PAK_SLOT_FREAD    40   /* size_t FRead(buf, size, FILE *) -> bytes read; slots as used by the game's read-whole-file helper WHGame+0x237bb0 */
 #define PAK_SLOT_FGETSIZE 47
@@ -2682,8 +2966,8 @@ static void *menu_xml_load(void *sys, void **sret, const char *file, BYTE reuse)
 {
     void *pak, *f, *res; char *src, *line; const char *nodes_end, *edges_end, *e, *e_start, *e_end; SIZE_T size, n, i; int unsupp = g_no_upscaler, k, prev;
     SB out = { 0, 0, 0 };
-    if (!readable(g_wh_base + RVA_PCRYPAK, 8)) { menu_fail("pCryPak slot unreadable"); return NULL; }
-    pak = *(void **)(g_wh_base + RVA_PCRYPAK);
+    if (!WH(A_PCRYPAK) || !readable(WH(A_PCRYPAK), 8)) { menu_fail("pCryPak slot unreadable"); return NULL; }
+    pak = *(void **)WH(A_PCRYPAK);
     if (!pak || !readable((const BYTE *)pak, 8) || !readable(*(BYTE **)pak, (PAK_SLOT_FCLOSE + 1) * 8)) { menu_fail("pCryPak not ready"); return NULL; }
     f = ((PFN_PakOpen)VT(pak, PAK_SLOT_FOPEN))(pak, file, "rb", 0);
     if (!f) { menu_fail("pCryPak cannot open the file"); return NULL; }
@@ -2750,12 +3034,15 @@ static void *my_LoadXmlFile(void *sys, void **sret, const char *file, BYTE reuse
 }
 static void menu_xml_install(BYTE *base)
 {
-    BYTE **slot = (BYTE **)(base + RVA_CSYS_VT + 112 * 8), **slot_buf = (BYTE **)(base + RVA_CSYS_VT + 111 * 8); DWORD old, tmp;
+    static const unsigned char need[] = { A_CSYS_VT, A_FN_LOADXML_FILE, A_FN_LOADXML_BUF, A_PCRYPAK };
+    BYTE **slot, **slot_buf; DWORD old, tmp;
     if (!g_cfg.menurows) { LOG(log_s("menu: rows disabled by KCDDLSS.ini (MenuRows 0): the page is the game's own")); return; }
+    if (!addr_all(need, sizeof need)) { LOGC(log_s("menu: unsupported game version, no DLSS rows in the options menu (unresolved: "); log_missing(need, sizeof need); log_s(")")); return; }
+    slot = (BYTE **)(WH(A_CSYS_VT) + 112 * 8); slot_buf = (BYTE **)(WH(A_CSYS_VT) + 111 * 8);
     if (!readable((BYTE *)slot_buf, 16)) { LOGC(log_s("menu: CSystem vtable unreadable: no DLSS rows in the options menu")); return; }
     if (*slot == (BYTE *)my_LoadXmlFile) return;
-    if (*slot != base + RVA_FN_LOADXML_FILE || *slot_buf != base + RVA_FN_LOADXML_BUF) {
-        LOGC(log_s("menu: ISystem::LoadXmlFromFile slot is "); log_x((ULONG_PTR)*slot); log_s(", expected WHGame.dll+"); log_x(RVA_FN_LOADXML_FILE); log_s(": unsupported game version, no DLSS rows in the options menu")); return;
+    if (*slot != WH(A_FN_LOADXML_FILE) || *slot_buf != WH(A_FN_LOADXML_BUF)) {
+        LOGC(log_s("menu: ISystem::LoadXmlFromFile slot is "); log_x((ULONG_PTR)*slot); log_s(", expected WHGame.dll+"); log_x((ULONG_PTR)(WH(A_FN_LOADXML_FILE) - base)); log_s(": unsupported game version, no DLSS rows in the options menu")); return;
     }
     if (!VirtualProtect(slot, 8, PAGE_READWRITE, &old)) { LOGC(log_s("menu: cannot write the CSystem vtable: no DLSS rows in the options menu")); return; }
     g_orig_loadxml = (PFN_LoadXmlFile)(void *)*slot; g_loadxml_buf = (PFN_LoadXmlBuf)(void *)*slot_buf;
@@ -2770,12 +3057,10 @@ static void menu_xml_install(BYTE *base)
  * the Resolution row shows it, until the startup settings repair it seconds later. Two vtable slots of that object are hooked:
  * Save writes the output size over the render size after the game's own Save, Load repairs a profile an older version saved
  * (fullscreen: the output is the desktop size). The game's setters are used, no file is touched. RE: scratch res/ notes, CHANGES.md 119. */
-#define RVA_SET_VT_LOAD   0x22ecf80u   /* settings object vtable: Load(this+0x10, IPlayerProfile *) */
-#define RVA_SET_VT_SAVE   0x22ecf88u   /*                         Save(this+0x10, IPlayerProfile *) */
-#define RVA_FN_SET_LOAD   0x1150d40u
-#define RVA_FN_SET_SAVE   0x11559c0u
-#define RVA_FN_ATTR_SETI  0x113ef10u   /* bool SetAttributeInt(IPlayerProfile *, const char *name, const int *value) */
-#define RVA_FN_ATTR_GETI  0x113be84u   /* bool GetAttributeInt(IPlayerProfile *, const char *name, int *value): value untouched when missing */
+/* A_SET_VT_LOAD: settings object vtable: Load(this+0x10, IPlayerProfile *) */
+/* A_SET_VT_SAVE: Save(this+0x10, IPlayerProfile *) */
+/* A_FN_ATTR_SETI: bool SetAttributeInt(IPlayerProfile *, const char *name, const int *value) */
+/* A_FN_ATTR_GETI: bool GetAttributeInt(IPlayerProfile *, const char *name, int *value): value untouched when missing */
 typedef void *(*PFN_SetIO)(void *self, void *profile, void *r8, void *r9);
 typedef char (*PFN_AttrI)(void *profile, const char *name, int *value);
 static PFN_SetIO g_orig_setload, g_orig_setsave;
@@ -2787,7 +3072,7 @@ static void *my_SetSave(void *self, void *profile, void *r8, void *r9)
         void *cw = cvar_find("r_Width"), *ch = cvar_find("r_Height"); int ow, oh, zero = 0;
         if (g_true_nw >= 640 && g_true_nh >= 480) { ow = (int)g_true_nw; oh = (int)g_true_nh; } else { ow = (int)g_mode_nw; oh = (int)g_mode_nh; }
         if (cw && ch && (UINT)cvar_int(cw) == g_mode_rw && (UINT)cvar_int(ch) == g_mode_rh && ow >= 640 && oh >= 480 && ((UINT)ow != g_mode_rw || (UINT)oh != g_mode_rh)) {
-            PFN_AttrI seti = (PFN_AttrI)(void *)(g_wh_base + RVA_FN_ATTR_SETI);
+            PFN_AttrI seti = (PFN_AttrI)(void *)WH(A_FN_ATTR_SETI);
             seti(profile, "res_x", &ow); seti(profile, "res_y", &oh); seti(profile, "nat_res_x", &zero); seti(profile, "nat_res_y", &zero);
             if (logged < 4) { logged++; LOG(log_s("profile: the game saved our render size "); log_u(g_mode_rw); log_s("x"); log_u(g_mode_rh); log_s(" as its resolution: replaced with the output size "); log_i(ow); log_s("x"); log_i(oh)); }
         }
@@ -2798,7 +3083,7 @@ static void *my_SetLoad(void *self, void *profile, void *r8, void *r9)
 {
     static int logged;
     if (profile && g_wh_base && g_cfg.prereq && g_cfg.mode >= -1 && g_cfg.mode <= 4) {
-        PFN_AttrI geti = (PFN_AttrI)(void *)(g_wh_base + RVA_FN_ATTR_GETI), seti = (PFN_AttrI)(void *)(g_wh_base + RVA_FN_ATTR_SETI);
+        PFN_AttrI geti = (PFN_AttrI)(void *)WH(A_FN_ATTR_GETI), seti = (PFN_AttrI)(void *)WH(A_FN_ATTR_SETI);
         int w = 0, h = 0, fs = -1, zero = 0; DEVMODEW dm;
         geti(profile, "res_x", &w); geti(profile, "res_y", &h); geti(profile, "res_fs", &fs);
         memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
@@ -2817,11 +3102,15 @@ static void *my_SetLoad(void *self, void *profile, void *r8, void *r9)
 }
 static void profile_res_install(BYTE *base)
 {
-    BYTE **sl = (BYTE **)(base + RVA_SET_VT_LOAD), **ss = (BYTE **)(base + RVA_SET_VT_SAVE); DWORD old, tmp;
+    static const unsigned char need[] = { A_SET_VT_LOAD, A_SET_VT_SAVE, A_FN_SET_LOAD, A_FN_SET_SAVE, A_FN_ATTR_SETI, A_FN_ATTR_GETI };
+    BYTE **sl = (BYTE **)WH(A_SET_VT_LOAD), **ss = (BYTE **)WH(A_SET_VT_SAVE); DWORD old, tmp;
+    (void)base;
     if (!g_cfg.saveres) { LOG(log_s("profile: SaveOutputRes 0 in KCDDLSS.ini: the game saves the render size as its resolution")); return; }
+    if (!addr_all(need, sizeof need)) { LOG(log_s("profile: unsupported game version, the saved resolution is left to the game (unresolved: "); log_missing(need, sizeof need); log_s(")")); return; }
+    if (ss != sl + 1) { LOG(log_s("profile: settings Load/Save slots not adjacent: unsupported game version, the saved resolution is left to the game")); return; }
     if (!readable((BYTE *)sl, 16)) { LOG(log_s("profile: settings vtable unreadable: the saved resolution is left to the game")); return; }
     if (*sl == (BYTE *)my_SetLoad) return;
-    if (*sl != base + RVA_FN_SET_LOAD || *ss != base + RVA_FN_SET_SAVE) { LOG(log_s("profile: settings Load/Save slots are "); log_x((ULONG_PTR)*sl); log_s(" / "); log_x((ULONG_PTR)*ss); log_s(": unsupported game version, the saved resolution is left to the game")); return; }
+    if (*sl != WH(A_FN_SET_LOAD) || *ss != WH(A_FN_SET_SAVE)) { LOG(log_s("profile: settings Load/Save slots are "); log_x((ULONG_PTR)*sl); log_s(" / "); log_x((ULONG_PTR)*ss); log_s(": unsupported game version, the saved resolution is left to the game")); return; }
     if (!VirtualProtect(sl, 16, PAGE_READWRITE, &old)) { LOG(log_s("profile: cannot write the settings vtable: the saved resolution is left to the game")); return; }
     g_orig_setload = (PFN_SetIO)(void *)*sl; g_orig_setsave = (PFN_SetIO)(void *)*ss;
     *sl = (BYTE *)my_SetLoad; *ss = (BYTE *)my_SetSave;
@@ -2836,7 +3125,6 @@ static void profile_res_install(BYTE *base)
  * 1080p exclusive fullscreen): the swap chain IS rebuilt, but the routine minimizes the game window as well (both with a
  * deactivate+activate pair and with the activate transition alone), so it has no advantage over the kick. Kept only behind the
  * "kick" command of KCDDLSS.cmd for experiments; the automatic kick stays the 0.7.5 minimize/restore. */
-#define RVA_FN_ONACTIVATE 0x666a24u
 #define R_DEVINFO   0x29968
 #define DI_ACTIVE   0x1e5   /* window-thread copy of the active state; DI+0x1e4 = the render thread's copy */
 #define R_FULLSCREEN 0x29c30
@@ -2844,9 +3132,11 @@ static const BYTE ONACTIVATE_SIG[] = { 0x48,0x89,0x5C,0x24,0x08, 0x48,0x89,0x6C,
 typedef void (*PFN_OnActivate)(BYTE *di, UINT_PTR wp, UINT_PTR lp);
 static int kick_activate(const char *why)
 {
+    static const unsigned char need[] = { A_RENDERER, A_FN_ONACTIVATE };
     BYTE *r, *di, *fn; PFN_OnActivate oa;
     if (!g_wh_base) return 0;
-    r = g_wh_base + RVA_RENDERER; di = r + R_DEVINFO; fn = g_wh_base + RVA_FN_ONACTIVATE;
+    if (!addr_all(need, sizeof need)) { LOG(log_s("display: "); log_s(why); log_s(": unsupported game version, renderer re-activate skipped (unresolved: "); log_missing(need, sizeof need); log_s(")")); return 0; }
+    r = WH(A_RENDERER); di = r + R_DEVINFO; fn = WH(A_FN_ONACTIVATE);
     if (!readable(fn, sizeof ONACTIVATE_SIG) || !same(fn, ONACTIVATE_SIG, sizeof ONACTIVATE_SIG)) { LOG(log_s("display: "); log_s(why); log_s(": OnActivate bytes differ (unsupported game version), renderer re-activate skipped")); return 0; }
     if (!readable(di, 0x300) || !readable(r + R_FULLSCREEN, 4)) { LOG(log_s("display: renderer device info unreadable, re-activate skipped")); return 0; }
     oa = (PFN_OnActivate)(void *)fn;
@@ -2867,6 +3157,7 @@ static void hook_whgame(BYTE *base)
     nt = (IMAGE_NT_HEADERS64 *)(base + dos->e_lfanew);
     if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) { LOGC(log_s("not a 64-bit PE image: nothing changed")); return; }
     if (nt->OptionalHeader.SizeOfImage < 0x3800000) { LOGC(log_s("WHGame.dll image too small for this build's offsets: nothing changed")); return; }
+    addr_init(base);
     grass_patch(base);
     sharpen_patch(base);
     dlss_install(base);

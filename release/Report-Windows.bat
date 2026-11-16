@@ -93,8 +93,9 @@ set "L=%B%\KCDDLSS.log"
 if not exist "%L%" if exist "%TEMP%\KCDDLSS.log" set "L=%TEMP%\KCDDLSS.log"
 if not exist "%L%" echo There is no KCDDLSS.log: the mod was not loaded when the game last started (see the loader lines above).
 if not exist "%L%" exit /b
-echo "%L%", first 250 lines:
-powershell -NoProfile -Command "Get-Content -LiteralPath $env:L -TotalCount 250" 2>nul
+echo "%L%", key lines (the full file has more):
+rem Short enough to paste into a comment: no NGX / module / per-frame lines, at most 3 lines of a kind, problems always kept.
+powershell -NoProfile -Command "$c = @{}; Get-Content -LiteralPath $env:L -TotalCount 4000 | Where-Object { if ($_ -match '^\s*$|^NGX\[|^env: module|^probe:|^sampler cache:|^res:|^mv:') { $false } elseif ($_ -match 'unsupported|SELF-CHECK|differ|fail|cannot|unresolved|not installed|skipped') { $true } else { $k = $_.Substring(0, [Math]::Min(11, $_.Length)); $c[$k] = 1 + $c[$k]; $c[$k] -le 3 } } | Select-Object -First 60 | ForEach-Object { if ($_.Length -gt 300) { $_.Substring(0, 300) + ' ...' } else { $_ } }" 2>nul
 exit /b
 
 :size

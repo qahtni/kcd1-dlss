@@ -115,11 +115,15 @@ game's settings menu puts its own values back, the plugin sets:
   anti-aliasing.
 - r_MotionVectors 1 and r_MotionBlurGBufferVelocity 1: the motion data
   DLSS needs (motion blur itself stays whatever you set).
-- e_svoTI_ResScaleBase 1: the global illumination (SVOGI) cone tracing runs
-  at the render resolution instead of half of it. At DLSS Performance the
-  game's half would be a quarter of your screen, upscaled twice, and the
-  lighting looks blotchy. Costs a little GPU time; GIFullRes = 0 in the ini
-  turns it off.
+- e_svoTI_LowSpecMode 3 and e_svoTI_ResScaleBase 0: the global illumination
+  (SVOGI) buffer is a third of the render size on every graphics preset. The
+  game's own size is 1/3 (Ultra) down to 1/8 (Low) of it, which at a DLSS
+  render size shows as blocks in shaded areas. With it: e_svoTI_ConeMaxLength 16
+  and e_svoTI_DiffuseConeWidth 32. Costs some GPU time on the lower presets; GIFullRes = 0 in the ini, or r_DLSSGI 0 in the console,
+  keeps the game's own values.
+  On a Steam Deck (the device itself; a PC running SteamOS or Bazzite is
+  not one) the mod sets GIFullRes = 0 in the ini at its first start, once.
+  After that the value is yours: GIFullRes = 1 turns it on.
 Your screen resolution and everything else in the options stay yours. The
 values are set in memory only and are not written to your profile.
 
@@ -155,13 +159,27 @@ Preset = Transformer (default, the DLSS 310 "Transformer" model), CNN (the
   older DLSS 3 look) or Default.
 Sharpness = 0 .. 1 (DLSS sharpening, default 0).
 MipBiasOffset = -1.0: texture detail. NVIDIA and AMD recommend -1.0, Intel 0.
+GIFullRes = 1: the global illumination settings above (0 = the game's own).
+InventoryFix = 1: smooth outline of the character in the inventory (0 = the
+  game's own blocky cut-out).
+
+ADVANCED SETTINGS (not in the file since BETA 6; add a line to change one,
+lines from an older KCDDLSS.ini keep working)
+NgxDll = : a file in Bin\Win64 to use as the upscaler instead of NVIDIA's
+  driver, e.g. NgxDll = OptiScaler.dll. See OPTISCALER.txt.
+Prereq = 1: the start-up settings above (0 = you manage them yourself).
 BlackMs = 0: set to e.g. 2000 to black out the 3D view for that many ms on
   a mode switch (hides the resize and the eye-adaptation flash).
-Prereq = 1 / GIFullRes = 1: the start-up settings above (0 = you manage them).
-NgxDll = : a file in Bin\Win64 to use as the upscaler instead of NVIDIA's
-  driver, e.g. OptiScaler.dll. See OPTISCALER.txt.
-Comments in the file explain the rest (object motion vectors, Exec; Probe
-is for the debug build).
+SaveOutputRes = 1: the game's saved resolution stays your screen size
+  (0 brings back the low-resolution start).
+VelocityDilate = -1: hair and beard motion repair, in pixels (-1 automatic,
+  0 off, 1 to 4 fixed).
+Exec = fxwrap WaterRipples: console commands the mod runs after the game's
+  profile, "name value; name value". The default is the fix for the blue
+  flash in water; your own line replaces it, so keep that part in it.
+Test switches, 1 by default, 0 breaks or turns off DLSS: DLSS, Jitter,
+  VelocityPatch, ObjectMV, MipBias. Probe = 0 turns off the blue-frame probe
+  of the debug build.
 
 CHECK THAT IT WORKS
 After the game reaches the menu, Bin\Win64\KCDDLSS.log contains
@@ -185,7 +203,7 @@ same place), start the game, reproduce the problem, close the game and
 send Bin\Win64\KCDDLSS.log (plus KCDDLSS.prev.log after a crash: the
 previous run's log is kept under that name). Then put the normal file back
 (reinstall). The debug build also writes NVIDIA's DLSS messages and the
-blue-frame probe (Probe = 1 in the ini) into the log.
+blue-frame probe into the log.
 
 KNOWN BEHAVIOUR
 - The first start after installing switches the game to native-resolution

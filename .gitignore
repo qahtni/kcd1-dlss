@@ -24,3 +24,5 @@ __pycache__/
 !tools/menu-mod/mod.manifest
 *.bin
 !tools/asi/patchb/cave.bin
+# test output
+tools/asi/test/tmp/

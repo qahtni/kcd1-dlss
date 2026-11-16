@@ -1,0 +1,25 @@
+# Lines the plugin must (+) or must not (-) write when it installs itself into the stock Steam WHGame.dll (host_test.c).
+# The test ini sets: Mode = Performance, GIFullRes = 2, InventoryFix = 0, Sharpness = 0.5
++KCD DLSS 0.
++Sharpness 50%
++Mode 0 (-1 auto)
++GIFullRes 2, InventoryFix 0
++addr: 28/28 resolved
++Steam build: self-check on
++grass fix applied: hook at WHGame.dll+0x522f96
++sharpen: forced conversation sharpening (Set 0.7) disabled: 3 bytes NOPed
++velocity: $VelocityObjects format eTF 0x0b R8G8S -> 0x0e R16G16F at 2 creation site(s)
++dlss: jitter zeroing NOPed at WHGame.dll+0x3e243f
++dlss: upscale hook installed (renderer vtable +0xab8)
++menu: ISystem::LoadXmlFromFile hooked (CSystem vtable slot 112)
++profile: settings Load/Save hooked
+-SELF-CHECK
+-UNRESOLVED
+-REJECTED
+-unsupported
+-differ
+-mismatch
+-unreadable
+-not installed
+-crash
+-exception

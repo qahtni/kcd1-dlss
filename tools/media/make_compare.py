@@ -16,6 +16,7 @@ FONT = 'WHS Champ Fleury Pro'
 GOLD, INK = (200, 170, 110), (240, 228, 200)
 os.makedirs(out, exist_ok=True)
 A, B = Image.open(a_path).convert('RGB'), Image.open(b_path).convert('RGB')
+SUB_A, SUB_B = os.environ.get('KCD_SUB_A', ''), os.environ.get('KCD_SUB_B', '')   # resolution line under/next to each label, e.g. '2227x1253 internal, 3840x2160 output'
 
 
 def text(t, em):
@@ -43,6 +44,8 @@ a, b = A.resize((W, H), Image.LANCZOS), B.resize((W, H), Image.LANCZOS)
 im = a.copy(); im.paste(b.crop((W // 2, 0, W, H)), (W // 2, 0)); im = im.convert('RGBA')
 ImageDraw.Draw(im).line([(W // 2, 0), (W // 2, H)], fill=GOLD, width=4)
 label(im, la, int(40 * S), H - int(110 * S), int(64 * S)); label(im, lb, W - int(40 * S), H - int(110 * S), int(64 * S), right=True)
+if SUB_A: label(im, SUB_A, int(40 * S), H - int(110 * S) - int(46 * S), int(32 * S))
+if SUB_B: label(im, SUB_B, W - int(40 * S), H - int(110 * S) - int(46 * S), int(32 * S), right=True)
 im.convert('RGB').save(f'{out}/compare_split_{W}x{H}.jpg', quality=92); print('wrote split', W, H)
 
 # 2. zooms: the same region from both, 3x nearest (shows the pixels as they are), side by side
@@ -51,6 +54,8 @@ for name, (x, y, w, h) in regions.items():
     ca, cb = A.crop((x, y, x + w, y + h)).resize((w * Z, h * Z), Image.NEAREST), B.crop((x, y, x + w, y + h)).resize((w * Z, h * Z), Image.NEAREST)
     im = Image.new('RGBA', (w * Z * 2 + gap, h * Z + 90), (8, 8, 6, 255))
     im.paste(ca, (0, 90)); im.paste(cb, (w * Z + gap, 90))
-    label(im, la, 20, 18, 52); label(im, lb, w * Z + gap + 20, 18, 52)
+    ma = label(im, la, 20, 18, 52); mb = label(im, lb, w * Z + gap + 20, 18, 52)
+    if SUB_A: label(im, SUB_A, 20 + ma.width + 30, 34, 28)
+    if SUB_B: label(im, SUB_B, w * Z + gap + 20 + mb.width + 30, 34, 28)
     label(im, f'{Z}x zoom', im.width - 20, 30, 30, right=True)
     im.convert('RGB').save(f'{out}/compare_zoom_{name}.jpg', quality=92); print('wrote zoom', name, im.size)
