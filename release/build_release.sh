@@ -58,7 +58,12 @@ else
 import sys
 s = open(sys.argv[1], 'rb').read()
 old = b'\nDx11Upscaler=auto'; assert s.count(old) == 1, 'Dx11Upscaler=auto not found once'
-open(sys.argv[2], 'wb').write(s.replace(old, b'\nDx11Upscaler=fsr31_12', 1))   # FSR 3.1 via DX12: upgrades to FSR 4 on RDNA 3/4
+s = s.replace(old, b'\nDx11Upscaler=fsr31_12', 1)   # FSR 3.1 via DX12: upgrades to FSR 4 on RDNA 3/4
+# GPU spoofing off: KCD has no DLSS of its own to fool, and with it on OptiScaler 0.9.4 hangs at start when another game in the
+# same Steam library has an nvngx_dlss.dll (CreateFileW hook re-enters its own static init; Nexus report 2026-11-15)
+for old, new in ((b'\nStreamlineSpoofing=auto', b'\nStreamlineSpoofing=false'), (b'\nDxgi=auto', b'\nDxgi=false')):
+    assert s.count(old) == 1, old; s = s.replace(old, new, 1)
+open(sys.argv[2], 'wb').write(s)
 PY
   for f in FidelityFX_v1_LICENSE.md FidelityFX_v2_LICENSE.md XeSS_LICENSE.txt DirectX_LICENSE.txt; do cp -p "$OPTI/Licenses/$f" "$O/Licenses/$f"; done
   sed 's/\r$//; s/$/\r/' "$OPTI_LIC" > "$O/Licenses/OptiScaler-LICENSE.txt"

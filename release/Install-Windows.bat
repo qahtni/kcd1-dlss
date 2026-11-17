@@ -69,6 +69,10 @@ if exist "%B%\KCDDLSS.ini" (
 @OPTI@if not exist "%B%\D3D12_Optiscaler" mkdir "%B%\D3D12_Optiscaler"
 @OPTI@copy /y /b "%SELF%\install\OptiScaler\D3D12_Optiscaler\D3D12Core.dll" "%B%\D3D12_Optiscaler\D3D12Core.dll" >nul || goto :copyfail
 @OPTI@if not exist "%B%\OptiScaler.ini" copy /y "%SELF%\install\OptiScaler\OptiScaler.ini" "%B%\OptiScaler.ini" >nul
+@OPTI@rem OptiScaler.ini (also a kept one): GPU spoofing off. With it on, OptiScaler 0.9.4 can hang at start when another game in the same Steam library has DLSS.
+@OPTI@set "OINI=%B%\OptiScaler.ini"
+@OPTI@powershell -NoProfile -ExecutionPolicy Bypass -Command "$f=$env:OINI; $t=@([IO.File]::ReadAllLines($f) | ForEach-Object { $_ -replace '^\s*(Dxgi|StreamlineSpoofing)\s*=.*$', '${1}=false' }); [IO.File]::WriteAllLines($f, $t)" >nul 2>&1
+@OPTI@findstr /r /i /c:"^Dxgi=false" "%OINI%" >nul && echo Settings: OptiScaler.ini set to Dxgi=false and StreamlineSpoofing=false ^(GPU spoofing off^). || echo Settings: could not edit OptiScaler.ini. Set Dxgi=false and StreamlineSpoofing=false in Bin\Win64\OptiScaler.ini yourself.
 @OPTI@if not exist "%B%\OptiScaler-Licenses" mkdir "%B%\OptiScaler-Licenses"
 @OPTI@copy /y "%SELF%\install\OptiScaler\Licenses\*.*" "%B%\OptiScaler-Licenses" >nul 2>nul
 @OPTI@echo OptiScaler: Bin\Win64\OptiScaler.dll and its FSR / XeSS files copied ^(OptiScaler @OPTI_VERSION@^).
